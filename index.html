@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lab Tycoon</title>
+    <link rel="stylesheet" href="/src/client/styles.css">
+</head>
+<body>
+    <div id="canvas-container"></div>
+
+    <div id="hud">
+        <div id="bar">
+            <div class="stat money" id="bar-money">$0</div>
+            <div class="stat rep" id="bar-rep">★</div>
+            <div class="stat day">
+                <span id="bar-day">Day 1</span>
+                <span class="daybar"><i id="bar-dayfill"></i></span>
+            </div>
+            <div class="stat" id="bar-clean">🧹 100%</div>
+
+            <div class="menus">
+                <button class="menu-btn" data-menu="build">Build</button>
+                <button class="menu-btn" data-menu="contracts">Contracts</button>
+                <button class="menu-btn" data-menu="staff">Staff</button>
+                <button class="menu-btn" data-menu="stock">Stock</button>
+                <button class="menu-btn" data-menu="upgrades">Upgrades</button>
+                <button class="menu-btn" data-menu="lab">Lab</button>
+                <button class="menu-btn" data-menu="help">? Help</button>
+                <span id="tool-chip" hidden></span>
+            </div>
+
+            <div class="spacer"></div>
+            <button id="bar-pause">⏸</button>
+            <button id="bar-speed">1×</button>
+            <button id="bar-new">New</button>
+        </div>
+
+        <div id="dropdown" hidden>
+            <button id="dropdown-close" aria-label="Close">×</button>
+            <div id="dropdown-content"></div>
+        </div>
+
+        <div id="hint">Drag to rotate view · scroll to zoom</div>
+        <button id="rotate-pill" hidden>⟳ Rotate</button>
+        <div id="toast"></div>
+    </div>
+
+    <script type="module" src="/src/client/main.js"></script>
+</body>
+</html>
