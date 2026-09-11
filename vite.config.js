@@ -3,6 +3,7 @@ import { resolve } from 'path';
 
 export default defineConfig({
   root: '.',
+  base: process.env.GITHUB_PAGES ? '/laboratory_tycoon/' : '/',
   publicDir: 'public',
   resolve: {
     alias: {
