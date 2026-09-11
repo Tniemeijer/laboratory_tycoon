@@ -398,7 +398,19 @@ class LabScene {
     _bindEvents() {
         const el = this.renderer.domElement;
         el.addEventListener('pointermove', e => this._onMove(e));
-        el.addEventListener('pointerdown', e => this._onDown(e));
+        // Acting on pointerdown directly used to fire a click/placement the instant a finger (or
+        // mouse) touched the canvas, even when the gesture turned into an OrbitControls drag —
+        // barely noticeable with a mouse (people rarely click-and-drag), but on touch, where
+        // dragging IS how you look around, every attempt to orbit the camera also placed/selected/
+        // demolished whatever was under the first-touched pixel. Track the down point and only
+        // treat it as a tap if release lands within a few pixels of it.
+        el.addEventListener('pointerdown', e => { this._downPt = { x: e.clientX, y: e.clientY, button: e.button }; });
+        el.addEventListener('pointerup', e => {
+            const d = this._downPt; this._downPt = null;
+            if (!d || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return;
+            this._onDown(e, d.button);
+        });
+        el.addEventListener('pointercancel', () => { this._downPt = null; });
         el.addEventListener('contextmenu', e => e.preventDefault());
         window.addEventListener('resize', () => this._resize());
     }
@@ -432,11 +444,11 @@ class LabScene {
             this.handlers.onTileHover && this.handlers.onTileHover(null, null);
         }
     }
-    _onDown(e) {
+    _onDown(e, button = e.button) {
         this._setPointer(e);
         const hit = this._pick();
         if (!hit) return;
-        if (e.button === 2) {
+        if (button === 2) {
             if (hit.type === 'equip') this.handlers.onEquipmentRightClick && this.handlers.onEquipmentRightClick(hit.id);
             return;
         }

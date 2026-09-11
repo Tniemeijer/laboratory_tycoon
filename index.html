@@ -18,22 +18,25 @@
                 <span class="daybar"><i id="bar-dayfill"></i></span>
             </div>
             <div class="stat" id="bar-clean">🧹 100%</div>
+            <button id="bar-toggle" aria-label="Show/hide menu">☰</button>
 
-            <div class="menus">
-                <button class="menu-btn" data-menu="build">Build</button>
-                <button class="menu-btn" data-menu="contracts">Contracts</button>
-                <button class="menu-btn" data-menu="staff">Staff</button>
-                <button class="menu-btn" data-menu="stock">Stock</button>
-                <button class="menu-btn" data-menu="upgrades">Upgrades</button>
-                <button class="menu-btn" data-menu="lab">Lab</button>
-                <button class="menu-btn" data-menu="help">? Help</button>
-                <span id="tool-chip" hidden></span>
+            <div class="bar-extra" id="bar-extra">
+                <div class="menus">
+                    <button class="menu-btn" data-menu="build">Build</button>
+                    <button class="menu-btn" data-menu="contracts">Contracts</button>
+                    <button class="menu-btn" data-menu="staff">Staff</button>
+                    <button class="menu-btn" data-menu="stock">Stock</button>
+                    <button class="menu-btn" data-menu="upgrades">Upgrades</button>
+                    <button class="menu-btn" data-menu="lab">Lab</button>
+                    <button class="menu-btn" data-menu="help">? Help</button>
+                    <span id="tool-chip" hidden></span>
+                </div>
+
+                <div class="spacer"></div>
+                <button id="bar-pause">⏸</button>
+                <button id="bar-speed">1×</button>
+                <button id="bar-new">New</button>
             </div>
-
-            <div class="spacer"></div>
-            <button id="bar-pause">⏸</button>
-            <button id="bar-speed">1×</button>
-            <button id="bar-new">New</button>
         </div>
 
         <div id="dropdown" hidden>

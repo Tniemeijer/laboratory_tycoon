@@ -35,6 +35,22 @@ export function initUI() {
     $('rotate-pill').addEventListener('click', () => rotateHotkey());
     $('dropdown-close').addEventListener('click', () => closeMenu());
 
+    // Stow away the menu row + pause/speed/new on request — handy on a small screen where the
+    // full bar eats a lot of vertical space. Remembered across sessions.
+    const BAR_COLLAPSE_KEY = 'labTycoonBarCollapsed';
+    const barExtra = $('bar-extra'), barToggle = $('bar-toggle');
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(BAR_COLLAPSE_KEY) === '1'; } catch (e) { /* private browsing */ }
+    barExtra.classList.toggle('collapsed', collapsed);
+    barToggle.classList.toggle('open', !collapsed);
+    barToggle.addEventListener('click', () => {
+        collapsed = !collapsed;
+        barExtra.classList.toggle('collapsed', collapsed);
+        barToggle.classList.toggle('open', !collapsed);
+        if (collapsed) closeMenu();
+        try { localStorage.setItem(BAR_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (e) { /* private browsing */ }
+    });
+
     document.addEventListener('click', (e) => {
         if (!e.target.closest('#dropdown') && !e.target.closest('#bar')) closeMenu();
     });
@@ -93,7 +109,7 @@ function equipAt(tx, tz) {
 function hint() {
     const h = $('hint');
     const pill = $('rotate-pill');
-    if (!G.tool) { h.textContent = 'Drag to rotate view · scroll to zoom · R rotates a machine you hover · X to demolish'; pill.hidden = true; }
+    if (!G.tool) { h.textContent = 'Drag to look around · scroll/pinch to zoom · Rotate & Demolish tools live in Build'; pill.hidden = true; }
     else if (G.tool === 'demolish') { h.textContent = 'Click a machine to sell it for half price. (Esc to stop)'; pill.hidden = true; }
     else if (G.tool === 'rotate') { h.textContent = 'Click a machine to rotate it. (Esc to stop)'; pill.hidden = true; }
     else { h.textContent = `Placing ${BUILD[G.tool].name} — click a tile · Esc to cancel`; pill.hidden = false; }

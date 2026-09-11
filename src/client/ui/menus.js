@@ -196,7 +196,7 @@ export const BUILDERS = {
         h += `<div class="dd-sub">Cleanliness</div>
             <div class="c-org">Machines leave grime behind as they're used. A filthy lab slows work and risks contamination — set a scientist's role to Clean, or leave everyone on Any and they'll mop when nothing more urgent needs doing.</div>`;
         h += `<div class="dd-sub">Building</div>
-            <div class="c-org">Pick a machine in <b>Build</b>, click a tile to place it. <b>R</b> rotates while placing, or hover a placed machine and press R. <b>X</b> (or the Demolish tool) sells one back for half price. Buy more land under Build → Expand Lab.</div>
+            <div class="c-org">Pick a machine in <b>Build</b>, tap a tile to place it — the <b>Rotate</b> button (or R) spins it while placing or afterward. <b>Demolish</b> (or X) sells one back for half price. Buy more land under Build → Expand Lab.</div>
             <div class="c-org">Most machines run one scientist at a time — build more to parallelize. Incubators and fridges are the exception: several staff can use those at once.</div>`;
         return h;
     }
