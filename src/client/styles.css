@@ -193,6 +193,16 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
     font-family: inherit; font-weight: 700; font-size: 12px; padding: 5px 10px; cursor: pointer;
 }
 #rotate-pill:hover { background: #f5b664; }
+#cam-rotate {
+    position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px;
+}
+#cam-rotate button {
+    background: var(--btn); border: 2px solid var(--edge); color: var(--ink);
+    font-family: inherit; font-weight: 700; font-size: 17px; width: 34px; height: 34px;
+    line-height: 1; cursor: pointer;
+}
+#cam-rotate button:hover { background: var(--btn-hi); }
+#cam-rotate button:active { transform: translateY(1px); }
 #toast {
     position: absolute; left: 50%; bottom: 46px; transform: translateX(-50%) translateY(12px);
     background: var(--panel); border: 3px solid var(--edge);

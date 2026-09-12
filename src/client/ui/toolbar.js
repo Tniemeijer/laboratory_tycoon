@@ -34,6 +34,8 @@ export function initUI() {
     $('bar-new').addEventListener('click', () => { if (confirm('Start a new game? Progress is lost.')) newGame(); });
     $('rotate-pill').addEventListener('click', () => rotateHotkey());
     $('dropdown-close').addEventListener('click', () => closeMenu());
+    $('cam-rotate-left').addEventListener('click', () => G.scene.rotateView(-1));
+    $('cam-rotate-right').addEventListener('click', () => G.scene.rotateView(1));
 
     // Stow away the menu row + pause/speed/new on request — handy on a small screen where the
     // full bar eats a lot of vertical space. Remembered across sessions.
@@ -59,6 +61,8 @@ export function initUI() {
         if (e.code === 'Escape') { if (openMenu) closeMenu(); else selectTool(null); }
         else if (e.code === 'KeyP') togglePause();
         else if (e.code === 'KeyR') rotateHotkey();
+        else if (e.code === 'KeyQ') G.scene.rotateView(-1);
+        else if (e.code === 'KeyE') G.scene.rotateView(1);
         else if (e.code === 'KeyX') selectTool('demolish');
         else if (e.code === 'KeyB') toggleMenu('build');
         else if (e.code === 'KeyC') toggleMenu('contracts');
@@ -70,6 +74,7 @@ export function initUI() {
     });
 
     render(true);
+    hint();
 
     const TUTORIAL_KEY = 'labTycoonSeenTutorial';
     try {
@@ -109,7 +114,7 @@ function equipAt(tx, tz) {
 function hint() {
     const h = $('hint');
     const pill = $('rotate-pill');
-    if (!G.tool) { h.textContent = 'Drag to look around · scroll/pinch to zoom · Rotate & Demolish tools live in Build'; pill.hidden = true; }
+    if (!G.tool) { h.textContent = 'Drag to move the view · Q/E (or ⟲⟳) to turn · scroll/pinch to zoom'; pill.hidden = true; }
     else if (G.tool === 'demolish') { h.textContent = 'Click a machine to sell it for half price. (Esc to stop)'; pill.hidden = true; }
     else if (G.tool === 'rotate') { h.textContent = 'Click a machine to rotate it. (Esc to stop)'; pill.hidden = true; }
     else { h.textContent = `Placing ${BUILD[G.tool].name} — click a tile · Esc to cancel`; pill.hidden = false; }

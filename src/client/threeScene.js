@@ -104,18 +104,39 @@ class LabScene {
         this.controls.target.set(0, 0, 0);
         this.controls.enableDamping = true;
         this.controls.dampingFactor = 0.08;
-        this.controls.enablePan = false;
-        // Zoomed all the way out or tilted all the way flat, the 16-tile lab used to shrink to a
-        // speck in a sea of empty lawn, or turn into an edge-on smear where nothing reads. These
-        // keep the map itself always reasonably framed and legible.
+        // RCT-style controls: dragging moves the camera across the map (not around it) — turning
+        // the view is a deliberate, discrete action via rotateView()/the rotate buttons below, not
+        // something you can end up doing by accident mid-drag. Disabling rotate this way also
+        // fixes the camera's pitch (RCT's isometric camera never tilts either), which is fine here
+        // since free tilt combined with free rotate was the actual source of the bad/degenerate
+        // viewing angles this whole feature exists to prevent.
+        this.controls.enableRotate = false;
+        this.controls.enablePan = true;
+        this.controls.screenSpacePanning = true;
+        this.controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+        this.controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
+        // Zoomed all the way out, the 16-tile lab used to shrink to a speck in a sea of empty
+        // lawn, showing the raw void past the ground plane. This keeps the map always reasonably
+        // framed and legible; panBounds (applied per-frame below) does the same for panning.
         this.controls.minZoom = 0.95;
         this.controls.maxZoom = 2.6;
-        this.controls.minPolarAngle = 0.3;
-        this.controls.maxPolarAngle = Math.PI / 2.7;
-        this.controls.rotateSpeed = 0.7;
+        this.panBounds = 11;
         this.camera.zoom = 1.15;
         this.camera.updateProjectionMatrix();
         this.controls.update();
+
+        // RCT-style fixed compass rotation: free-dragging still feels responsive while it's
+        // happening, but the instant you let go, the view snaps onto the nearest of the 4
+        // "corner" viewing angles (45°/135°/225°/315° — offset from the grid axes on purpose,
+        // since looking straight down a row of tiles is exactly the degenerate, bad-looking
+        // angle this is meant to prevent). Tilt is untouched — only compass heading snaps.
+        this._azTween = null;
+        // Anchors the snap grid to wherever the camera actually starts (a 45°-off-axis corner),
+        // rather than to 0 — rounding cur/STEP*STEP directly would snap to 0°/90°/180°/270°,
+        // which are exactly the axis-aligned angles this whole feature exists to avoid.
+        this._azBase = this.controls.getAzimuthalAngle();
+        this.controls.addEventListener('start', () => { this._azTween = null; });
+        this.controls.addEventListener('end', () => this._snapAzimuth());
 
         this.scene.add(new THREE.AmbientLight(0xffffff, 1.05));
         this.scene.add(new THREE.HemisphereLight(0xffffff, 0x5b6b55, 0.45));
@@ -401,9 +422,9 @@ class LabScene {
         // Acting on pointerdown directly used to fire a click/placement the instant a finger (or
         // mouse) touched the canvas, even when the gesture turned into an OrbitControls drag —
         // barely noticeable with a mouse (people rarely click-and-drag), but on touch, where
-        // dragging IS how you look around, every attempt to orbit the camera also placed/selected/
-        // demolished whatever was under the first-touched pixel. Track the down point and only
-        // treat it as a tap if release lands within a few pixels of it.
+        // dragging IS how you move the view around, every attempt to pan the camera also
+        // placed/selected/demolished whatever was under the first-touched pixel. Track the down
+        // point and only treat it as a tap if release lands within a few pixels of it.
         el.addEventListener('pointerdown', e => { this._downPt = { x: e.clientX, y: e.clientY, button: e.button }; });
         el.addEventListener('pointerup', e => {
             const d = this._downPt; this._downPt = null;
@@ -962,11 +983,69 @@ class LabScene {
         }
     }
 
+    // Snaps the camera's compass heading to the nearest 90°-step "corner" view. Called
+    // automatically once a drag ends; also reachable directly via rotateView() for the
+    // explicit rotate-left/rotate-right controls.
+    _nearestStep(angle) {
+        const STEP = Math.PI / 2;
+        return this._azBase + Math.round((angle - this._azBase) / STEP) * STEP;
+    }
+    _snapAzimuth() {
+        this._startAzTween(this._nearestStep(this.controls.getAzimuthalAngle()));
+    }
+    rotateView(dir) {
+        const STEP = Math.PI / 2;
+        // Chain off the queued destination if a snap/step is already mid-flight, so a quick
+        // double-tap of the rotate button always lands two full steps away rather than
+        // fighting the tween in progress.
+        const base = this._azTween ? this._azTween.to : this._nearestStep(this.controls.getAzimuthalAngle());
+        this._startAzTween(base + dir * STEP);
+    }
+    // A fast drag-release leaves damped rotational momentum (OrbitControls' internal
+    // sphericalDelta) decaying across several future update() calls — left alone, that
+    // leftover keeps nudging the camera on top of our tween every frame, since update() always
+    // re-applies it regardless of who else is driving the camera. Toggling damping off for one
+    // update() call applies 100% of whatever's left and then clears it, instead of trickling it
+    // out — so the tween starts from the camera's true resting angle and nothing fights it after.
+    _drainMomentum() {
+        const wasDamping = this.controls.enableDamping;
+        this.controls.enableDamping = false;
+        this.controls.update();
+        this.controls.enableDamping = wasDamping;
+    }
+    _startAzTween(to) {
+        this._drainMomentum();
+        const from = this.controls.getAzimuthalAngle();
+        if (Math.abs(to - from) < 0.001) return;
+        this._azTween = {
+            from, to,
+            polar: this.controls.getPolarAngle(),
+            radius: this.camera.position.distanceTo(this.controls.target),
+            t: 0, dur: 0.28
+        };
+    }
+    _updateAzTween(dt) {
+        const tw = this._azTween;
+        if (!tw) return;
+        tw.t = Math.min(1, tw.t + dt / tw.dur);
+        const e = 1 - Math.pow(1 - tw.t, 3);   // ease-out cubic
+        const az = tw.from + (tw.to - tw.from) * e;
+        const offset = new THREE.Vector3().setFromSphericalCoords(tw.radius, tw.polar, az);
+        this.camera.position.copy(this.controls.target).add(offset);
+        if (tw.t >= 1) this._azTween = null;
+    }
+
     _animate() {
         requestAnimationFrame(() => this._animate());
         const dt = Math.min(this.clock.getDelta(), 0.1);
         this.elapsed += dt;
         if (this.onFrame) this.onFrame(dt);
+        this._updateAzTween(dt);
+        // Panning has no built-in limit in OrbitControls, so a long drag could otherwise pan the
+        // target straight out into the dark void past the lab. Clamped before update() so the
+        // camera position it computes this frame already reflects the corrected target.
+        this.controls.target.x = Math.max(-this.panBounds, Math.min(this.panBounds, this.controls.target.x));
+        this.controls.target.z = Math.max(-this.panBounds, Math.min(this.panBounds, this.controls.target.z));
         this.controls.update();
         this.renderer.render(this.scene, this.camera);
     }
