@@ -22,9 +22,19 @@ export function addDirt(e, amt) {
     recomputeGrime();
 }
 export function recomputeGrime() {
+    const s = G.state;
+    const nv = nav();
     let t = 0;
-    for (const k in G.state.dirt) t += G.state.dirt[k];
-    G.state.grime = t;
+    for (const k in s.dirt) {
+        // A dirty tile that's since had a machine built on it has no floor left to mop — leaving
+        // the entry in place meant topDirtTile() (which already skips unreachable tiles) would
+        // skip it forever, and that grime would sit there dragging cleanliness down permanently
+        // with nothing anyone could ever do about it.
+        const [x, z] = k.split(',').map(Number);
+        if (nv[z * GRID + x]) { delete s.dirt[k]; delete s.dirtClaims[k]; continue; }
+        t += s.dirt[k];
+    }
+    s.grime = t;
 }
 // Picks the dirtiest tile nobody is already headed to, so two cleaners never converge on the
 // same spill — a later responder simply doesn't see it as a candidate at all.

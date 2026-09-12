@@ -87,10 +87,16 @@ export function zoneOwnedTileCount(ownedZones) {
     return n;
 }
 
-function tileHasEquip(equipment, tx, tz, ignoreId) {
+// A "room" (Cleanroom, Dark Room — see BUILD[type].room) is floor, not furniture: normal
+// equipment can be placed on its tiles same as bare ground, since that's the whole point (a Scale
+// only works once it's wheeled inside one). The reverse isn't true — a room still can't be placed
+// on top of existing equipment or another room, so this only waives the collision one direction.
+function tileBlocked(equipment, tx, tz, ignoreId, placingRoom) {
     for (const e of equipment) {
         if (e.id === ignoreId) continue;
-        for (const [x, z] of footTiles(e.type, e.tx, e.tz, e.rot)) if (x === tx && z === tz) return true;
+        if (!footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz)) continue;
+        if (!placingRoom && BUILD[e.type].room) continue;   // ok: normal equipment going inside an existing room
+        return true;
     }
     return false;
 }
@@ -102,7 +108,7 @@ export function canPlace(state, type, tx, tz, rot, ignoreId) {
         if (x < 0 || z < 0 || x >= GRID || z > BUILD_MAX_Z) return { ok: false, why: 'out of bounds' };
         if (!isTileOwned(state.ownedZones, x, z)) return { ok: false, why: 'unowned land' };
         if (inBreakRoom(x, z) || inBreakRoomWallRing(x, z)) return { ok: false, why: 'break room' };
-        if (tileHasEquip(state.equipment, x, z, ignoreId)) return { ok: false, why: 'blocked' };
+        if (tileBlocked(state.equipment, x, z, ignoreId, !!b.room)) return { ok: false, why: 'blocked' };
     }
     return { ok: true };
 }
@@ -138,8 +144,10 @@ export function buildNav(state) {
     for (const [fx, fz] of BREAK_ROOM_FURNITURE) g[fz * GRID + fx] = 1;
     for (const [rx, rz] of BREAK_ROOM_WALL_RING)
         if (rx >= 0 && rz >= 0 && rx < GRID && rz < GRID) g[rz * GRID + rx] = 1;
-    for (const e of state.equipment)
+    for (const e of state.equipment) {
+        if (BUILD[e.type].room) continue;   // a room is floor, not an obstacle — equipment placed inside it still blocks normally
         for (const [x, z] of footTiles(e.type, e.tx, e.tz, e.rot))
             if (x >= 0 && z >= 0 && x < GRID && z < GRID) g[z * GRID + x] = 1;
+    }
     return g;
 }

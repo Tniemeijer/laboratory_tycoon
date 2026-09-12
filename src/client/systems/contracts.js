@@ -5,6 +5,10 @@ import { G, nid, labLevel, repMult, dirtyUI } from '../core.js';
 
 function makeOffer() {
     const s = G.state, lv = labLevel();
+    // No equipment-ownership gate here — a protocol needing a Cleanroom/Dark Room-contained
+    // machine (Pharma, Immunofluorescence) is still offered purely by Lab Rating, same as any
+    // other; if the right setup isn't built yet, staff.js's usual "no machine for X" warning
+    // covers it once a sample actually needs that step.
     const pool = Object.keys(PROTOCOLS).filter(k => PROTOCOLS[k].minLevel <= lv);
     const key = pool[Math.floor(Math.random() * pool.length)];
     const proto = PROTOCOLS[key];
@@ -22,6 +26,39 @@ function makeOffer() {
 }
 export function refillOffers() { while (G.state.offers.length < OFFER_COUNT) G.state.offers.push(makeOffer()); }
 
+// Samples don't all show up on day one — they trickle in as a few shipments spread across the
+// first ~60% of the contract's deadline (leaving the back end free to actually process the last
+// one before it's due). That's what makes storage a real decision: you can't just grab every
+// sample you'll ever need for the job in one trip, so holding a partial batch in staging or the
+// fridge until the rest of a shipment arrives actually pays off.
+function makeArrivals(required, day, deadline) {
+    const span = Math.max(1, deadline - day);
+    const shipments = required <= 3 ? 1 : required <= 6 ? 2 : 3;
+    const arrivals = [];
+    let remaining = required;
+    for (let i = 0; i < shipments; i++) {
+        const last = i === shipments - 1;
+        const count = last ? remaining : Math.max(1, Math.round(required / shipments));
+        remaining -= count;
+        const arrivalDay = shipments === 1 ? day : day + Math.round(span * 0.6 * i / (shipments - 1));
+        arrivals.push({ day: arrivalDay, count });
+    }
+    return arrivals;
+}
+function deliverDue(c, spawnSample) {
+    if (!c.arrivals || !c.arrivals.length) return;
+    const s = G.state;
+    const due = c.arrivals.filter(a => a.day <= s.day);
+    if (!due.length) return;
+    for (const a of due) for (let i = 0; i < a.count; i++) spawnSample(c.proto, c.id);
+    c.arrivals = c.arrivals.filter(a => a.day > s.day);
+    dirtyUI();
+}
+// Called once per day tick (see game.js's advanceTime) so scheduled shipments actually land.
+export function checkContractArrivals(spawnSample) {
+    for (const c of G.state.contracts) deliverDue(c, spawnSample);
+}
+
 export function acceptContract(id, spawnSample) {
     const s = G.state;
     if (s.contracts.length >= MAX_ACTIVE) return G.onToast('Too many active contracts', true);
@@ -29,8 +66,9 @@ export function acceptContract(id, spawnSample) {
     if (i === -1) return;
     const c = s.offers.splice(i, 1)[0];
     c.state = 'active';
+    c.arrivals = makeArrivals(c.required, s.day, c.deadline);
     s.contracts.push(c);
-    for (let k = 0; k < c.required; k++) spawnSample(c.proto, c.id);
+    deliverDue(c, spawnSample);
     refillOffers();
     G.onToast(`Accepted: ${c.name}`);
     dirtyUI();

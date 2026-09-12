@@ -2,18 +2,19 @@
 // Owns the save file, the day/tick loop, and equipment placement. Gameplay systems live in
 // ./systems/*; this module wires them together and re-exports the public API the UI/scene use.
 
-import { BUILD, REAGENTS, INGREDIENTS, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST } from './data.js';
+import { BUILD, REAGENTS, INGREDIENTS, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, MECH_REPAIR_COST, START_LOAN, LOAN_INTEREST_RATE, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL } from './data.js';
 import {
-    G, nid, resetIdCounter, currentIdCounter, dirtyUI, bumpNav,
-    labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps,
+    G, nid, resetIdCounter, currentIdCounter, dirtyUI, bumpNav, nav,
+    labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown
 } from './core.js';
 import { canPlace as gridCanPlace } from './grid.js';
-import { refillOffers, acceptContract as acceptContractSys, failContract } from './systems/contracts.js';
+import { refillOffers, acceptContract as acceptContractSys, failContract, checkContractArrivals } from './systems/contracts.js';
 import { spawnSample, abandonSample, updateSamples } from './systems/samples.js';
-import { updateStaff, hireStaff, setRole } from './systems/staff.js';
-import { buyUpgrade, buyZone, buyIngredient, applyDailyUtilities } from './systems/economy.js';
+import { updateStaff, hireStaff, toggleStaffCap } from './systems/staff.js';
+import { buyUpgrade, buyZone, buyIngredient, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan } from './systems/economy.js';
 import { recomputeGrime } from './systems/dirt.js';
+import { updateEquipment } from './systems/equipment.js';
 
 const DAY_LENGTH = 60;
 const SAVE_KEY = 'labTycoonSave.v4';
@@ -21,10 +22,11 @@ const SAVE_KEY = 'labTycoonSave.v4';
 // ---------- re-exports (the public API used by ui.js / threeScene.js) ----------
 export {
     BUILD, REAGENTS, INGREDIENTS, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL,
-    WATER_BATCH, WATER_MIN, REAGENT_WATER_COST,
-    G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps,
+    WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, MECH_REPAIR_COST,
+    LOAN_INTEREST_RATE, LOAN_MAX, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL,
+    G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, nav,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown,
-    hireStaff, setRole, buyUpgrade, buyZone, buyIngredient
+    hireStaff, toggleStaffCap, buyUpgrade, buyZone, buyIngredient, borrowLoan, repayLoan
 };
 export function acceptContract(id) { acceptContractSys(id, spawnSample); }
 
@@ -32,7 +34,8 @@ export function acceptContract(id) { acceptContractSys(id, spawnSample); }
 function fresh() {
     resetIdCounter(1);
     const st = {
-        money: 13000,
+        money: START_LOAN,
+        loan: START_LOAN,
         reputation: 0,
         day: 1,
         dayFrac: 0,
@@ -56,7 +59,7 @@ function fresh() {
         grime: 0,
         contaminationCooldown: 0,
         lastBill: 0,
-        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0 },
+        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0 },
         stats: { done: 0, failed: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0 },
         navVersion: 0,
         uiRev: 0,
@@ -81,7 +84,8 @@ export function placeEquipment(type, tx, tz, rot) {
     s.money -= BUILD[type].cost;
     s.equipment.push({
         id: nid(), type, tx, tz, rot: rot || 0,
-        slots: BUILD[type].slots || 0, processing: [], reserved: 0
+        slots: BUILD[type].slots || 0, processing: [], reserved: 0,
+        staged: [], condition: 100, broken: false, operateClaim: null, fixClaim: null
     });
     bumpNav();
     G.onToast(`Built ${BUILD[type].name}`);
@@ -105,8 +109,10 @@ export function demolish(id) {
     const i = s.equipment.findIndex(e => e.id === id);
     if (i === -1) return;
     const e = s.equipment[i];
-    for (const p of (e.processing || []).slice()) abandonSample(p.sampleId);
-    for (const w of s.staff) if (w.job && (w.job.stationId === id || w.reservedStation === id)) G.releaseWorkerJob(w);
+    for (const p of (e.processing || []).slice())
+        for (const sid of (p.sampleIds || [p.sampleId])) abandonSample(sid);
+    for (const g of (e.staged || []).slice()) abandonSample(g.sampleId);
+    for (const w of s.staff) if (w.job && (w.job.stationId === id || w.job.fixId === id || w.job.operateId === id || w.reservedStation === id)) G.releaseWorkerJob(w);
     s.money += Math.round(BUILD[e.type].cost * 0.5);
     s.equipment.splice(i, 1);
     bumpNav();
@@ -136,6 +142,8 @@ function advanceTime(dt) {
     while (s.dayFrac >= 1) {
         s.dayFrac -= 1; s.day++;
         applyDailyUtilities();
+        applyDailyInterest();
+        checkContractArrivals(spawnSample);
         for (const c of s.contracts.slice()) if (s.day > c.deadline) failContract(c, abandonSample);
         s.offers = s.offers.filter(o => o.deadline > s.day + 1);
         refillOffers();
@@ -160,17 +168,57 @@ function loadSave() {
         G.state = p.state; resetIdCounter(p.idc);
         const s = G.state;
         s.offers ||= []; s.contracts ||= []; s.samples ||= []; s.staff ||= [];
-        s.equipment ||= []; s.reagents ||= []; s.dirt ||= {}; s.dirtClaims ||= {}; s.warns = {};
+        s.equipment ||= []; s.reagents ||= []; s.dirt ||= {}; s.warns = {};
+        // Every worker's job is about to get wiped below, so no dirtClaims entry from the old
+        // save can possibly still be backed by a live worker — a hard reset, not just a default
+        // for when it's missing, otherwise an orphaned claim makes topDirtTile() skip that tile
+        // forever with nobody left who was ever going to mop it.
+        s.dirtClaims = {};
         s.prepping ||= {}; s.ingredients ||= { salineSalt: 0, solventBase: 0, bufferMix: 0 };
         s.water ||= 0;
+        if (s.loan == null) s.loan = 0;   // pre-existing saves started debt-free under the old economy
         if (s.coldStore == null) s.coldStore = true;
         s.ownedZones ||= ZONES.filter(z => z.startOwned).map(z => z.id);
         s.upgrades ||= { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0 };
         if (s.upgrades.clean == null) s.upgrades.clean = 0;
         if (s.upgrades.radio == null) s.upgrades.radio = 0;
-        for (const e of s.equipment) { e.processing = []; e.reserved = 0; e.rot = e.rot || 0; }
-        for (const w of s.staff) { w.job = null; w.carrying = null; w.reservedStation = null; w.path = null; w.state = 'idle'; w.role = w.role || 'any'; }
-        for (const sm of s.samples) { if (sm.state !== 'queued') { sm.state = 'queued'; sm.claimedBy = null; } }
+        if (s.upgrades.cart == null) s.upgrades.cart = 0;
+        for (const e of s.equipment) {
+            e.processing = []; e.reserved = 0; e.rot = e.rot || 0; e.staged = [];
+            if (e.condition == null) e.condition = 100;
+            e.broken = false;
+            // Same reasoning as the dirtClaims reset above — every worker's job is about to be
+            // wiped, so no equipment claim from the old save can still be backed by a live
+            // worker. Left alone, a stale one would make findReadyBatchJob()/assignMechanicJob()
+            // skip this equipment forever, since nothing would ever be left to clear it.
+            e.operateClaim = null; e.fixClaim = null;
+        }
+        for (const w of s.staff) {
+            w.job = null; w.carrying = null; w.reservedStation = null; w.path = null; w.state = 'idle';
+            if (!w.caps) {
+                // Migrate the old exclusive role string to independent checkboxes.
+                const oldRole = w.role || 'any';
+                w.caps = {
+                    process: oldRole === 'any' || oldRole === 'process',
+                    clean: oldRole === 'any' || oldRole === 'clean',
+                    mechanic: oldRole === 'mechanic'
+                };
+            }
+            delete w.role;
+            if (w.name && w.name.startsWith('Dr. ')) w.name = w.name.slice(4);
+            if (w.skin == null) w.skin = SKIN_TONES[Math.floor(Math.random() * SKIN_TONES.length)];
+            if (w.hairColor == null) w.hairColor = HAIR_COLORS[Math.floor(Math.random() * HAIR_COLORS.length)];
+            if (w.hairLong == null) w.hairLong = Math.random() < 0.5;
+            w.skillXp ||= {};
+        }
+        // Every worker's job was just wiped above, and every equipment's staged/processing list
+        // was cleared too, so no sample can still legitimately be 'staged'/'processing'/'carried'
+        // (those normalize back to 'queued') — and no claimedBy can still be backed by a live
+        // worker either. That part used to only run inside the state-normalizing branch, so a
+        // sample that already happened to be sitting in 'queued' with a claim at save time (e.g.
+        // one a worker had just claimed mid-walk to pick up) kept that stale claim forever,
+        // invisible to pickSampleJob and silently occupying capacity in anyStationWantsMore.
+        for (const sm of s.samples) { if (sm.state !== 'queued') sm.state = 'queued'; sm.claimedBy = null; }
         recomputeGrime();
         s.navVersion = (s.navVersion || 0) + 1;
         return true;
@@ -192,6 +240,7 @@ export function tick(dt) {
         advanceTime(g);
         updateSamples(g);
         updateStaff(g);
+        updateEquipment(g);
     }
     if (G.scene) G.scene.sync(s, dt);
 }

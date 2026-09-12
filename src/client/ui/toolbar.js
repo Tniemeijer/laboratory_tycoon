@@ -114,7 +114,7 @@ function equipAt(tx, tz) {
 function hint() {
     const h = $('hint');
     const pill = $('rotate-pill');
-    if (!G.tool) { h.textContent = 'Drag to move the view · Q/E (or ⟲⟳) to turn · scroll/pinch to zoom'; pill.hidden = true; }
+    if (!G.tool) { h.textContent = 'Drag or WASD to move the view · Q/E (or ⟲⟳) to turn · scroll/pinch to zoom'; pill.hidden = true; }
     else if (G.tool === 'demolish') { h.textContent = 'Click a machine to sell it for half price. (Esc to stop)'; pill.hidden = true; }
     else if (G.tool === 'rotate') { h.textContent = 'Click a machine to rotate it. (Esc to stop)'; pill.hidden = true; }
     else { h.textContent = `Placing ${BUILD[G.tool].name} — click a tile · Esc to cancel`; pill.hidden = false; }
@@ -143,7 +143,13 @@ export const sceneHandlers = {
             const e = G.state.equipment.find(x => x.id === id);
             if (e) {
                 const b = BUILD[e.type];
-                const use = b.slots ? ((e.processing || []).length || e.reserved ? 'in use' : 'free') : b.desc;
+                let use;
+                if (e.broken) use = 'BROKEN — needs a mechanic';
+                else if (!(b.caps || []).length) use = b.slots ? ((e.processing || []).length || e.reserved ? 'in use' : 'free') : b.desc;
+                else {
+                    const staged = (e.staged || []).length, running = (e.processing || []).length;
+                    use = `${running ? `running (${running})` : 'idle'}${staged ? `, ${staged} staged` : ''} · ${Math.round(e.condition ?? 100)}% condition`;
+                }
                 G.onToast(`${b.name} — ${use}`);
             }
         }

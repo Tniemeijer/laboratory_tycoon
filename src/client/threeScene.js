@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { BUILD, ZONES } from './data.js';
+import { BUILD, ZONES, PROTOCOLS, COND_BREAKDOWN_THRESHOLD } from './data.js';
 import {
     GRID, BUILD_MAX_Z, BREAK_ROOM, COFFEE_TILE, WATER_COOLER_TILE, VENDING_TILE, TABLE_TILE,
     tileToWorld, footTiles, zoneAt, gateXRange
@@ -9,17 +9,35 @@ import {
 const HALF = GRID / 2;
 const RES_SCALE = 0.36;
 const LERP_K = 9;
+const ROTATE_COOLDOWN = 0.3;   // seconds between accepted camera-rotate inputs — see rotateView()
 
 // States where the worker is genuinely standing still (never calls stepPath in staff.js) — used
 // to gate the wall-safety clamp below without fighting legitimate walking lag at 2x/3x speed.
 // Notably excludes 'idle' and 'resting': both can still be mid-walk toward a rest tile.
-const STATIONARY_STATES = new Set(['mopping', 'atStation', 'tending', 'prepping', 'filling']);
-const PROTO_COLOR = { blood: 0xe0555f, tissue: 0x77c97b, chem: 0x5b8de8, virus: 0xf1d34a, dna: 0xb06cd9 };
+const STATIONARY_STATES = new Set(['mopping', 'atStation', 'prepping', 'filling', 'repairing', 'maintaining', 'operating', 'tending']);
+const PROTO_COLOR = { blood: 0xe0555f, tissue: 0x77c97b, chem: 0x5b8de8, virus: 0xf1d34a, dna: 0xb06cd9, immuno: 0x35d0ff, pharma: 0xf07a3c };
+// A sample's physical form follows whatever step it's headed into next, not just a tube the whole
+// way through — mounted on a slide once it's on its way to be imaged, turned into a written-up
+// report once it's on its way to be analyzed. Everything else (prep, spin, incubate) is still the
+// raw tube. Used both for the loose sample mesh (via sampleAppearance) and for staged/processing
+// tray items sitting on the equipment itself (via appearanceForCap directly, since those already
+// carry their cap and don't need a sample lookup).
+function appearanceForCap(cap) {
+    if (cap === 'image' || cap === 'fluoresce') return 'slide';
+    if (cap === 'analyze') return 'report';
+    return 'tube';
+}
+function sampleAppearance(sm) {
+    const step = PROTOCOLS[sm.proto].steps[sm.step];
+    return appearanceForCap(step ? step.cap : null);
+}
 // Real lab equipment is mostly steel/white/grey — samples and status lights carry the color instead.
 // The mop closet stays warm/wood-toned since it's furniture, not clinical equipment.
 const EQUIP_COLOR = {
-    bench: 0xc4cdd2, microscope: 0x585e63, centrifuge: 0xe8ebed, incubator: 0xd6dadd,
-    analyzer: 0xdfe3e5, fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3
+    bench: 0xc4cdd2, preprobot: 0x4a5560, microscope: 0x585e63, centrifuge: 0xe8ebed, incubator: 0xd6dadd,
+    analyzer: 0xdfe3e5, fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3,
+    scale: 0xe8ebed, chromatograph: 0xdfe3e5, darkroom: 0x2a2e33, cleanroom: 0xeef3f4,
+    flowhood: 0xe8ebed, fumehood: 0xc9ced3
 };
 
 // Idle chatter around the break room. Coffee/radio lines only fire in their own context
@@ -30,13 +48,19 @@ const LAB_QUOTES = ["Where are my goggles?", "Is it Friday yet?", "I mislabeled 
 
 // Height to float each type's progress bar at, clear of its own model.
 const BAR_Y = {
-    bench: 0.85, microscope: 1.3, centrifuge: 0.95, incubator: 1.45, analyzer: 1.25,
-    fridge: 1.5, freezer: 1.65, sink: 0.8, mopcloset: 1.45
+    bench: 0.85, preprobot: 1.15, microscope: 1.3, centrifuge: 0.95, incubator: 1.45, analyzer: 1.25,
+    fridge: 1.5, freezer: 1.65, sink: 0.8, mopcloset: 1.45,
+    scale: 0.75, chromatograph: 1.35, flowhood: 1.35, fumehood: 1.55
 };
 
 function lmat(c, e = {}) { return new THREE.MeshLambertMaterial({ color: c, ...e }); }
 function box(w, h, d, c, e) { return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), lmat(c, e)); }
 function cyl(rt, rb, h, s, c) { return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, s), lmat(c)); }
+// Every scientist wears a plain white labcoat — with capabilities now independently toggleable
+// (Process/Clean/Mechanic checkboxes) rather than one exclusive role, coloring the coat by
+// whichever capability happened to be checked/unchecked most recently read as arbitrary and kept
+// changing underfoot. The mop swing already shows who's actually cleaning right now.
+const COAT_COLOR = 0xf2f4f7;
 
 // dims of a footprint after rotation
 function footDims(type, rot) {
@@ -434,6 +458,49 @@ class LabScene {
         el.addEventListener('pointercancel', () => { this._downPt = null; });
         el.addEventListener('contextmenu', e => e.preventDefault());
         window.addEventListener('resize', () => this._resize());
+
+        // WASD pans the camera continuously while held, same destination as a mouse drag — held
+        // state only, the actual per-frame movement happens in _updatePanKeys() from _animate().
+        this._panKeys = new Set();
+        const PAN_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD']);
+        window.addEventListener('keydown', e => {
+            if (e.target.tagName === 'INPUT' || !PAN_CODES.has(e.code)) return;
+            this._panKeys.add(e.code);
+        });
+        window.addEventListener('keyup', e => { this._panKeys.delete(e.code); });
+        window.addEventListener('blur', () => this._panKeys.clear());
+    }
+    // Moves controls.target at a fixed world-space speed in whichever direction the currently
+    // held WASD keys imply, relative to the camera's own facing (so W always scrolls "away from
+    // camera" on screen no matter which of the 4 snapped compass angles you're looking from) —
+    // the same target OrbitControls' own drag-to-pan already moves, so this rides along with the
+    // existing panBounds clamp in _animate() for free.
+    _updatePanKeys(dt) {
+        if (!this._panKeys.size) return;
+        const theta = this.controls.getAzimuthalAngle();
+        // Flat (XZ) "camera → target" direction at this azimuth — see _updateAzTween's use of
+        // the same Spherical convention for "target → camera" (the position offset); this is
+        // just that direction reversed, since panning "forward" scrolls the ground toward camera.
+        const fx = -Math.sin(theta), fz = -Math.cos(theta);
+        const rx = -fz, rz = fx;   // rotate 90° for the strafe (A/D) axis
+        let mx = 0, mz = 0;
+        if (this._panKeys.has('KeyW')) { mx += fx; mz += fz; }
+        if (this._panKeys.has('KeyS')) { mx -= fx; mz -= fz; }
+        if (this._panKeys.has('KeyD')) { mx += rx; mz += rz; }
+        if (this._panKeys.has('KeyA')) { mx -= rx; mz -= rz; }
+        const len = Math.hypot(mx, mz);
+        if (len < 1e-6) return;
+        const PAN_SPEED = 8;   // world units/sec
+        const step = PAN_SPEED * dt / len;
+        const dx = mx * step, dz = mz * step;
+        // A real pan has to move the camera itself, not just where it's looking — moving only
+        // the target leaves the camera behind, so controls.update() (which re-derives azimuth
+        // and polar from the camera→target offset every frame) sees a different offset and
+        // reads it as the view having tilted, not panned. Translating both by the same delta
+        // keeps that offset — and so the tilt — exactly as it was, same as OrbitControls' own
+        // drag-to-pan already does under the hood.
+        this.controls.target.x += dx; this.controls.target.z += dz;
+        this.camera.position.x += dx; this.camera.position.z += dz;
     }
     _setPointer(e) {
         const r = this.renderer.domElement.getBoundingClientRect();
@@ -518,8 +585,6 @@ class LabScene {
         g.userData = { kind: 'equip', id: e.id, type: e.type, rot: e.rot };
         const col = EQUIP_COLOR[e.type] || 0xcccccc;
         const [fw, fh] = BUILD[e.type].foot;                 // model built in base orientation
-        const base = box(fw - 0.12, 0.14, fh - 0.12, 0x40474d); base.position.y = 0.07;
-        g.add(base);
         const tray = new THREE.Group(); tray.position.y = 0.62; g.userData.tray = tray; g.add(tray);
 
         // Progress bar, floating above the machine while it's actively running a timed step
@@ -538,12 +603,52 @@ class LabScene {
         g.userData.progressFg = barFg;
         g.userData.progressGroup = barGroup;
 
+        // Reliability light — hidden while a machine's in good shape, amber once it's worn
+        // enough to risk breaking, blinking red once it actually has (see sync() below). Sits
+        // just above the progress bar rather than replacing it, since a machine can be both
+        // mid-run and showing amber at the same time.
+        const warnLight = box(0.16, 0.16, 0.16, 0xf0a03c);
+        warnLight.position.set(0, (BAR_Y[e.type] || 1.4) + 0.22, 0);
+        warnLight.visible = false;
+        g.add(warnLight);
+        g.userData.warnLight = warnLight;
+
         if (e.type === 'bench') {
             const top = box(0.85, 0.16, 0.85, col); top.position.y = 0.52; g.add(top);
             for (const [x, z] of [[.32, .32], [-.32, .32], [.32, -.32], [-.32, -.32]]) {
                 const l = box(0.08, 0.46, 0.08, 0x6b7075); l.position.set(x, 0.25, z); g.add(l);
             }
             const shelf = box(0.7, 0.1, 0.16, 0xdedede); shelf.position.set(0, 0.72, -0.32); g.add(shelf);
+        } else if (e.type === 'preprobot') {
+            // A benchtop liquid-handling deck spanning its full 2×1 footprint — classic Tecan-style
+            // rig: a bench with a small well grid, an XY gantry (two side rails + a crossing
+            // bridge) suspended over it, and a pipetting head hanging off the bridge.
+            const benchTop = box(fw - 0.15, 0.14, fh - 0.15, 0xc4cdd2); benchTop.position.y = 0.52; g.add(benchTop);
+            const legX = fw / 2 - 0.12, legZ = fh / 2 - 0.12;
+            for (const [x, z] of [[legX, legZ], [-legX, legZ], [legX, -legZ], [-legX, -legZ]]) {
+                const l = box(0.08, 0.46, 0.08, 0x6b7075); l.position.set(x, 0.25, z); g.add(l);
+            }
+            for (const xs of [-1, 1]) for (const zs of [-1, 1]) {
+                const well = box(0.1, 0.04, 0.1, 0x8a9196); well.position.set(xs * fw * 0.18, 0.61, zs * fh * 0.2); g.add(well);
+            }
+            const railZ = fh / 2 - 0.08, railY = 0.95;
+            const railL = box(fw - 0.24, 0.045, 0.045, col); railL.position.set(0, railY, railZ); g.add(railL);
+            const railR = box(fw - 0.24, 0.045, 0.045, col); railR.position.set(0, railY, -railZ); g.add(railR);
+            for (const xs of [-1, 1]) for (const zs of [-1, 1]) {
+                const post = box(0.045, railY - 0.6, 0.045, 0x6b7075);
+                post.position.set(xs * (fw / 2 - 0.12), 0.6 + (railY - 0.6) / 2, zs * railZ);
+                g.add(post);
+            }
+            // The bridge (+head +tip) rides as one carriage that actually slides along the rails
+            // while a run is active (see sync()'s timedBusy handling) — a static gantry read as
+            // just a shelf with a bar over it, not a robot at work.
+            const carriage = new THREE.Group(); carriage.position.set(0, railY, 0);
+            carriage.userData.gantrySlide = true; carriage.userData.gantryRange = fw / 2 - 0.3;
+            g.add(carriage);
+            const bridge = box(0.06, 0.06, fh - 0.1, 0x2f3438); carriage.add(bridge);
+            const head = box(0.09, 0.16, 0.06, 0x8a9196); head.position.set(0, -0.14, 0); carriage.add(head);
+            const tip = box(0.05, 0.03, 0.03, 0x37ff8a, { transparent: true, opacity: 0.9 });
+            tip.position.set(0, -0.23, 0); tip.userData.spin = true; carriage.add(tip);
         } else if (e.type === 'microscope') {
             // Used to float knee-high on a squat pedestal — now sits properly on a bench, like
             // the actual Lab Bench model, with the scope mounted on top.
@@ -618,6 +723,94 @@ class LabScene {
             const spout = box(0.06, 0.06, 0.2, 0x9aa2a8); spout.position.set(0, 0.85, -0.13); g.add(spout);
             const drip = box(0.05, 0.05, 0.05, 0x8be0f0, { transparent: true, opacity: 0.85 });
             drip.position.set(0, basinTop + 0.02, -0.05); g.add(drip);
+        } else if (e.type === 'scale') {
+            const base = box(0.6, 0.1, 0.5, col); base.position.y = 0.35; g.add(base);
+            for (const [x, z] of [[.22, .18], [-.22, .18], [.22, -.18], [-.22, -.18]]) {
+                const l = box(0.05, 0.32, 0.05, 0x8a9196); l.position.set(x, 0.19, z); g.add(l);
+            }
+            const pan = cyl(0.18, 0.18, 0.02, 12, 0xdfe3e5); pan.position.y = 0.41; g.add(pan);
+            const disp = box(0.22, 0.1, 0.04, 0x11333a); disp.position.set(0, 0.55, 0.24); g.add(disp);
+            const num = box(0.16, 0.05, 0.01, 0x37ff8a, { transparent: true, opacity: 0.85 });
+            num.position.set(0, 0.55, 0.265); num.userData.spin = true; g.add(num);
+        } else if (e.type === 'flowhood' || e.type === 'fumehood') {
+            // Enclosed on all four sides — the whole point of either cabinet is containment, so a
+            // hood open on the sides would defeat it. The front panel stops short of the counter,
+            // leaving a gap to reach through instead of a full wall, same as a real sash/glovebox.
+            const isFume = e.type === 'fumehood';
+            const glassCol = isFume ? 0x9aa2a8 : 0xcfe8f2, glassOp = isFume ? 0.45 : 0.35;
+            const base = box(0.85, 0.5, 0.85, col); base.position.y = 0.28; g.add(base);
+            const counterTop = 0.53, hoodY = 1.03, gap = 0.16;
+            const frontBottom = counterTop + gap;
+            const midEnclosure = (counterTop + hoodY) / 2, enclosureH = hoodY - counterTop;
+            const front = box(0.68, hoodY - frontBottom, 0.03, glassCol, { transparent: true, opacity: glassOp });
+            front.position.set(0, (frontBottom + hoodY) / 2, 0.34); g.add(front);
+            const back = box(0.68, enclosureH, 0.03, glassCol, { transparent: true, opacity: glassOp });
+            back.position.set(0, midEnclosure, -0.34); g.add(back);
+            const left = box(0.03, enclosureH, 0.7, glassCol, { transparent: true, opacity: glassOp });
+            left.position.set(0.34, midEnclosure, 0); g.add(left);
+            const right = box(0.03, enclosureH, 0.7, glassCol, { transparent: true, opacity: glassOp });
+            right.position.set(-0.34, midEnclosure, 0); g.add(right);
+            for (const [x, z] of [[0.34, 0.34], [-0.34, 0.34], [0.34, -0.34], [-0.34, -0.34]]) {
+                const post = box(0.035, enclosureH, 0.035, 0x6b7075); post.position.set(x, midEnclosure, z); g.add(post);
+            }
+            if (isFume) {
+                const stripe = box(0.87, 0.05, 0.03, 0xf0c040); stripe.position.set(0, counterTop - 0.03, 0.435); g.add(stripe);
+                const duct = cyl(0.13, 0.13, 0.45, 10, 0x8a9196); duct.position.y = 1.26; g.add(duct);
+                const cap = cyl(0.16, 0.16, 0.05, 10, 0x6b7075); cap.position.y = 1.5; g.add(cap);
+            } else {
+                const hood = box(0.8, 0.2, 0.8, 0xe8ebed); hood.position.y = 1.08; g.add(hood);
+                const filterGlow = box(0.6, 0.03, 0.6, 0x8be0c0, { transparent: true, opacity: 0.8 });
+                filterGlow.position.y = 1.19; g.add(filterGlow);
+            }
+        } else if (e.type === 'chromatograph') {
+            const cabFace = (fh - 0.2) / 2;
+            const cab = box(fw - 0.2, 0.9, fh - 0.2, col); cab.position.y = 0.5; g.add(cab);
+            // A glass separation column with a colored band standing in for the mobile phase —
+            // the one part of the machine that's visibly "chemistry" rather than just a cabinet.
+            const column = cyl(0.06, 0.06, 0.55, 10, 0xd8dde1, { transparent: true, opacity: 0.55 });
+            column.position.set(fw * 0.18, 1.05, 0); g.add(column);
+            const liquid = cyl(0.05, 0.05, 0.4, 10, 0x5b8de8); liquid.position.set(fw * 0.18, 0.95, 0); g.add(liquid);
+            const scr = box(fw * 0.36, 0.3, 0.05, 0x11333a); scr.position.set(-fw * 0.15, 0.75, cabFace + 0.03); g.add(scr);
+            const trace = box(fw * 0.3, 0.2, 0.02, 0x37ff8a, { transparent: true, opacity: 0.85 });
+            trace.position.set(-fw * 0.15, 0.75, cabFace + 0.08); trace.userData.spin = true; g.add(trace);
+        } else if (e.type === 'darkroom') {
+            // A 4×4 room, not a machine — it doesn't process anything itself (see equipCaps() in
+            // core.js): any Microscope standing on one of its tiles picks up fluorescence imaging.
+            // Same room-with-open-corner shape as the Cleanroom below, but light-sealed (opaque
+            // near-black walls instead of glass) with a UV accent instead of a filter vent. Placing
+            // another Dark Room flush against this one just tiles a second one right next to it —
+            // no special joining needed, each covers its own floor independently.
+            const floor = box(fw - 0.1, 0.04, fh - 0.1, 0x1c1f22); floor.position.y = 0.02; g.add(floor);
+            const px = (fw - 0.2) / 2, pz = (fh - 0.2) / 2;
+            for (const [x, z] of [[-px, -pz], [px, -pz], [-px, pz]]) {
+                const post = box(0.08, 1.1, 0.08, 0x2a2e33); post.position.set(x, 0.55, z); g.add(post);
+            }
+            const wallW = box(0.06, 1.0, fh - 0.15, 0x14161a); wallW.position.set(-px - 0.02, 0.5, 0); g.add(wallW);
+            const wallN = box(fw - 0.15, 1.0, 0.06, 0x14161a); wallN.position.set(0, 0.5, -pz - 0.02); g.add(wallN);
+            // a mid-wall support post on each solid side — a 4-tile wall reads as too thin/sparse
+            // with only the corner posts holding it up
+            const wallMidW = box(0.08, 1.1, 0.08, 0x2a2e33); wallMidW.position.set(-px, 0.55, 0); g.add(wallMidW);
+            const wallMidN = box(0.08, 1.1, 0.08, 0x2a2e33); wallMidN.position.set(0, 0.55, -pz); g.add(wallMidN);
+            // open corner (SE, no post/wall) reads as the doorway a scientist wheels a microscope through
+            const glow = box(0.16, 0.16, 0.04, 0x9d6cff, { transparent: true, opacity: 0.9 });
+            glow.position.set(px, 0.95, pz); glow.userData.spin = true; g.add(glow);
+        } else if (e.type === 'cleanroom') {
+            // A 4×4 room — see the Dark Room comment above, same non-blocking/independently-
+            // tiling design, just glass-walled and sterile-white instead of light-sealed.
+            const floor = box(fw - 0.1, 0.04, fh - 0.1, 0xf4f7f8); floor.position.y = 0.02; g.add(floor);
+            const px = (fw - 0.2) / 2, pz = (fh - 0.2) / 2;
+            for (const [x, z] of [[-px, -pz], [px, -pz], [-px, pz], [px, pz]]) {
+                const post = box(0.06, 1.1, 0.06, 0xb8c2c6); post.position.set(x, 0.55, z); g.add(post);
+            }
+            const wallGlassN = box(fw - 0.15, 0.9, 0.03, 0xcfe8f2, { transparent: true, opacity: 0.35 });
+            wallGlassN.position.set(0, 0.5, -pz); g.add(wallGlassN);
+            const wallGlassS = box(fw - 0.15, 0.9, 0.03, 0xcfe8f2, { transparent: true, opacity: 0.35 });
+            wallGlassS.position.set(0, 0.5, pz); g.add(wallGlassS);
+            const wallMidN = box(0.06, 1.1, 0.06, 0xb8c2c6); wallMidN.position.set(0, 0.55, -pz); g.add(wallMidN);
+            const wallMidS = box(0.06, 1.1, 0.06, 0xb8c2c6); wallMidS.position.set(0, 0.55, pz); g.add(wallMidS);
+            const vent = box(0.4, 0.06, 0.4, 0xdfe3e5); vent.position.set(0, 1.05, 0); g.add(vent);
+            const ventGlow = box(0.3, 0.02, 0.3, 0x8be0c0, { transparent: true, opacity: 0.8 });
+            ventGlow.position.set(0, 1.09, 0); g.add(ventGlow);
         }
 
         if (e.id != null) this._applyEquipTransform(g, e);
@@ -632,39 +825,100 @@ class LabScene {
     }
     _syncTray(g, e) {
         const tray = g.userData.tray;
-        const items = (e.processing || []);
-        while (tray.children.length < items.length) {
-            const t = box(0.12, 0.28, 0.12, 0xffffff);
-            tray.add(t);
+        // Staged samples (dimmed — waiting on a fuller batch or their turn) render alongside
+        // actively running ones (full color), one item per sample either way — a solo run is
+        // just a processing entry with one id in it, same as a batch with several. Each item's
+        // shape follows the same tube/slide/report logic as the loose sample mesh (see
+        // appearanceForCap) — samples used to always render as a plain tube dot here regardless
+        // of stage, so a report waiting to be analyzed on the bench looked like it had reverted
+        // to a fresh sample the moment it got staged there.
+        const items = [];
+        for (const st of (e.staged || [])) items.push({ proto: st.proto, cap: st.cap, dim: true });
+        for (const p of (e.processing || [])) {
+            const ids = p.sampleIds || (p.sampleId != null ? [p.sampleId] : []);
+            for (let i = 0; i < ids.length; i++) items.push({ proto: p.proto, cap: p.cap, dim: false });
         }
-        while (tray.children.length > items.length) tray.remove(tray.children[tray.children.length - 1]);
-        tray.children.forEach((t, i) => {
-            const p = items[i];
-            t.material.color.setHex(PROTO_COLOR[p.proto] || 0xffffff);
-            t.position.set(-0.24 + (i % 3) * 0.24, 0, -0.1 + Math.floor(i / 3) * 0.24);
+        const sig = items.map(it => `${it.proto}:${it.cap}:${it.dim}`).join('|');
+        if (tray.userData.sig === sig) return;   // nothing about the contents actually changed
+        tray.userData.sig = sig;
+        while (tray.children.length) tray.remove(tray.children[0]);
+        items.forEach((it, i) => {
+            const cell = new THREE.Group();
+            cell.position.set(-0.24 + (i % 3) * 0.24, 0, -0.1 + Math.floor(i / 3) * 0.24);
+            this._fillTrayItem(cell, it);
+            tray.add(cell);
         });
+    }
+    _fillTrayItem(cell, it) {
+        const base = new THREE.Color(PROTO_COLOR[it.proto] || 0xffffff);
+        const tint = hex => (it.dim ? new THREE.Color(hex).lerp(new THREE.Color(0x888888), 0.55) : new THREE.Color(hex)).getHex();
+        const protoCol = (it.dim ? base.clone().lerp(new THREE.Color(0x888888), 0.55) : base).getHex();
+        const appearance = appearanceForCap(it.cap);
+        if (appearance === 'slide') {
+            const glass = box(0.16, 0.014, 0.07, tint(0xcfe3ea), { transparent: true, opacity: 0.8 });
+            glass.position.y = 0.05; cell.add(glass);
+            const smear = box(0.06, 0.015, 0.04, protoCol); smear.position.y = 0.058; cell.add(smear);
+        } else if (appearance === 'report') {
+            const paper = box(0.14, 0.012, 0.18, tint(0xf4ede0)); paper.position.y = 0.05; cell.add(paper);
+            const stamp = box(0.04, 0.013, 0.04, protoCol); stamp.position.set(0.04, 0.057, 0.05); cell.add(stamp);
+        } else {
+            const t = box(0.12, 0.28, 0.12, protoCol); cell.add(t);
+        }
     }
 
     _buildSample(s) {
         const g = new THREE.Group();
         g.userData = { kind: 'sample', id: s.id };
-        const c = PROTO_COLOR[s.proto] || 0xffffff;
-        const tube = box(0.22, 0.34, 0.22, c); tube.position.y = 0.17;
-        const cap = box(0.26, 0.08, 0.26, 0xffffff); cap.position.y = 0.37;
-        g.add(tube, cap);
+        this._fillSample(g, s);
         return g;
+    }
+    // (Re)builds a sample's visible form for whatever it's currently headed toward. Called once
+    // at creation and again whenever its step (and so its appearance category) changes — most
+    // samples never trigger the second case at all, only ones on a chain that passes through
+    // image or analyze.
+    _fillSample(g, s) {
+        while (g.children.length) g.remove(g.children[0]);
+        const appearance = sampleAppearance(s);
+        g.userData.appearance = appearance;
+        const c = PROTO_COLOR[s.proto] || 0xffffff;
+        if (appearance === 'slide') {
+            // A microscope slide: thin glass with the mounted specimen showing through, plus a
+            // little paper label stuck on one end.
+            const glass = box(0.34, 0.02, 0.14, 0xcfe3ea, { transparent: true, opacity: 0.8 });
+            glass.position.y = 0.09; g.add(glass);
+            const smear = box(0.12, 0.022, 0.08, c); smear.position.set(-0.05, 0.101, 0); g.add(smear);
+            const label = box(0.09, 0.021, 0.13, 0xf4ede0); label.position.set(0.12, 0.1, 0); g.add(label);
+        } else if (appearance === 'report') {
+            // A written-up report on a clipboard, on its way to be analyzed at a desk — flat
+            // paper with a couple of ruled lines and a proto-colored result stamp.
+            const board = box(0.28, 0.02, 0.36, 0x8a6a4a); board.position.y = 0.08; g.add(board);
+            const paper = box(0.24, 0.015, 0.3, 0xf4ede0); paper.position.y = 0.095; g.add(paper);
+            const line1 = box(0.16, 0.016, 0.018, 0x9a9184); line1.position.set(0, 0.1, -0.08); g.add(line1);
+            const line2 = box(0.16, 0.016, 0.018, 0x9a9184); line2.position.set(0, 0.1, -0.03); g.add(line2);
+            const stamp = box(0.07, 0.017, 0.07, c); stamp.position.set(0.07, 0.1, 0.09); g.add(stamp);
+        } else {
+            const tube = box(0.22, 0.34, 0.22, c); tube.position.y = 0.17; g.add(tube);
+            const cap = box(0.26, 0.08, 0.26, 0xffffff); cap.position.y = 0.37; g.add(cap);
+        }
     }
 
     _buildStaff(s) {
         const g = new THREE.Group();
         g.userData = { kind: 'staff', id: s.id, facing: 0, mopping: false };
         const body = new THREE.Group();
+        const skinCol = s.skin ?? 0xf0c9a4, hairCol = s.hairColor ?? 0x3b2a1d;
         const legs = box(0.26, 0.3, 0.2, 0x394a63); legs.position.y = 0.15;
-        const coatCol = s.role === 'clean' ? 0x3fb6a8 : 0xf2f4f7;
-        const coat = box(0.34, 0.42, 0.24, coatCol); coat.position.y = 0.52;
-        const head = box(0.22, 0.22, 0.22, 0xf0c9a4); head.position.y = 0.85;
-        const hair = box(0.24, 0.08, 0.24, 0x3b2a1d); hair.position.y = 0.97;
+        const coat = box(0.34, 0.42, 0.24, COAT_COLOR); coat.position.y = 0.52;
+        const head = box(0.22, 0.22, 0.22, skinCol); head.position.y = 0.85;
+        const hair = box(0.24, 0.08, 0.24, hairCol); hair.position.y = 0.97;
         body.add(legs, coat, head, hair);
+        if (s.hairLong) {
+            // Hangs down the back of the head rather than just capping it — same hair color,
+            // assigned once at hiring alongside the short/long choice so it doesn't change look
+            // from one render to the next.
+            const hairBack = box(0.2, 0.26, 0.1, hairCol); hairBack.position.set(0, 0.78, -0.15);
+            body.add(hairBack);
+        }
 
         // Held mop, hidden except while actively mopping (animated in the render loop below) —
         // this is how "currently cleaning" reads now, instead of tinting the whole coat.
@@ -717,22 +971,56 @@ class LabScene {
                 mesh.userData.progressFg.scale.x = Math.max(0.001, avg);
             }
             mesh.userData.progressGroup.visible = timed.length > 0;
+
+            // Reliability light: red and blinking once broken (can't accept new work until a
+            // mechanic fixes it), steady amber once worn enough that a breakdown becomes a real
+            // risk, otherwise hidden — most machines spend most of their life not showing this.
+            const wl = mesh.userData.warnLight;
+            if (e.broken) {
+                wl.visible = Math.sin(this.elapsed * 9) > -0.2;
+                wl.material.color.setHex(0xe0454a);
+            } else if ((e.condition ?? 100) < COND_BREAKDOWN_THRESHOLD) {
+                wl.visible = true;
+                wl.material.color.setHex(0xf0a03c);
+            } else {
+                wl.visible = false;
+            }
         });
 
-        const vis = state.samples.filter(s => s.state === 'queued' || s.state === 'carried');
+        // A sample sitting in cold storage keeps state 'queued' (so decay/retrieval logic treats
+        // it the same as one waiting in the lobby) but shouldn't render as one — the fridge/
+        // freezer already shows its contents via the same tray-dot system every other machine
+        // uses (see _syncTray), positioned correctly on the unit itself. Rendering this too used
+        // to also place a full loose sample mesh out at the access tile the worker stood on to
+        // reach the fridge — nowhere near the fridge, and redundant with the tray dot besides.
+        const vis = state.samples.filter(s => (s.state === 'queued' && !s.storedAt) || s.state === 'carried');
         this._reconcile(this.sampleMeshes, vis, s => this._buildSample(s), (mesh, s) => {
+            const appearance = sampleAppearance(s);
+            if (mesh.userData.appearance !== appearance) this._fillSample(mesh, s);
             mesh.userData.carried = s.state === 'carried';
             if (s.state === 'carried') {
                 // Used to sit at head height dead-center on the worker (y=0.7, x/z matching
                 // theirs exactly) — looked like it was floating inside their skull. Now offset
                 // to the carrier's side at roughly hand height, using their current facing so it
-                // stays on the same side of their body as they turn.
-                const carrier = state.staff.find(w => w.carrying === s.id);
+                // stays on the same side of their body as they turn. A Sample Cart trip carries
+                // several at once — stacking them by height alone put a second tube's midpoint
+                // below the first tube's top, so they clipped straight through each other; spread
+                // them along a row perpendicular to the carry direction instead, all level, so a
+                // full cart reads as several distinct tubes rather than one glowing blob.
+                const carrier = state.staff.find(w => Array.isArray(w.carrying) && w.carrying.includes(s.id));
                 const carrierMesh = carrier && this.staffMeshes.get(carrier.id);
                 const facing = carrierMesh ? carrierMesh.userData.facing : 0;
+                const idx = carrier ? carrier.carrying.indexOf(s.id) : 0;
+                const n = carrier ? carrier.carrying.length : 1;
                 mesh.userData.facing = facing;
                 const hx = Math.cos(facing) * 0.21, hz = -Math.sin(facing) * 0.21;
-                mesh.userData.target = { x: s.wx + hx, y: 0.56, z: s.wz + hz };
+                // Each tube is 0.22 wide — spacing needs to clear that even in the worst-case
+                // orientation (the row axis running diagonally across a tube's square footprint,
+                // ~0.31 corner-to-corner), not just the straight-on 0.22.
+                const rowAngle = facing + Math.PI / 2;
+                const rx = Math.cos(rowAngle) * 0.32, rz = -Math.sin(rowAngle) * 0.32;
+                const spread = idx - (n - 1) / 2;
+                mesh.userData.target = { x: s.wx + hx + rx * spread, y: 0.56, z: s.wz + hz + rz * spread };
             } else {
                 mesh.userData.target = { x: s.wx, y: 0.14, z: s.wz };
             }
@@ -775,9 +1063,6 @@ class LabScene {
             // than half a tile (the lerp has no notion of game speed), so clamping movers too would
             // make fast-forward staff visibly snap around instead of walking smoothly.
             mesh.userData.truePos = STATIONARY_STATES.has(s.state) ? { x: s.wx, z: s.wz } : null;
-            // Coat color is a stable identity marker (dedicated cleaner vs. anyone else), not a
-            // moment-to-moment activity indicator — the mop swinging (below) shows that instead.
-            mesh.userData.coat.material.color.setHex(s.role === 'clean' ? 0x3fb6a8 : 0xf2f4f7);
             mesh.userData.mopping = s.state === 'mopping';
             const idling = s.state === 'idle' || s.state === 'resting';
             const cm = this.coffeeMachine.position;
@@ -815,7 +1100,12 @@ class LabScene {
         this.equipMeshes.forEach((mesh) => {
             step(mesh);
             if (mesh.userData.timedBusy) {
-                mesh.traverse(o => { if (o.userData.spinAnim) o.rotation.y += dt * 9; });
+                mesh.traverse(o => {
+                    if (o.userData.spinAnim) o.rotation.y += dt * 9;
+                    // Prep Robot gantry: slides back and forth along its rail while a run is
+                    // active, instead of just sitting there with a blinking light.
+                    if (o.userData.gantrySlide) o.position.x = Math.sin(this.elapsed * 2.6) * o.userData.gantryRange;
+                });
             }
         });
         this.sampleMeshes.forEach((mesh, id) => {
@@ -994,6 +1284,18 @@ class LabScene {
         this._startAzTween(this._nearestStep(this.controls.getAzimuthalAngle()));
     }
     rotateView(dir) {
+        // Chaining off the queued destination (below) tracks where the view is *headed*
+        // correctly across a rapid double-tap, but "from" is read fresh as the camera's actual
+        // current angle each call — and between two presses close enough together that no
+        // render frame has landed in between, the camera hasn't physically moved at all yet.
+        // The result: "to" keeps marching forward a full step per press while "from" stays put,
+        // so the tween span grows with every extra press but its duration doesn't — a handful of
+        // fast presses could queue up a many-hundred-degree sweep to cover in the same ~0.28s,
+        // reading as the view spinning wildly rather than stepping. A short cooldown sidesteps
+        // the whole problem by simply not letting a new step start that fast to begin with.
+        const now = this.elapsed;
+        if (this._lastRotateInput != null && now - this._lastRotateInput < ROTATE_COOLDOWN) return;
+        this._lastRotateInput = now;
         const STEP = Math.PI / 2;
         // Chain off the queued destination if a snap/step is already mid-flight, so a quick
         // double-tap of the rotate button always lands two full steps away rather than
@@ -1041,6 +1343,7 @@ class LabScene {
         this.elapsed += dt;
         if (this.onFrame) this.onFrame(dt);
         this._updateAzTween(dt);
+        this._updatePanKeys(dt);
         // Panning has no built-in limit in OrbitControls, so a long drag could otherwise pan the
         // target straight out into the dark void past the lab. Clamped before update() so the
         // camera position it computes this frame already reflects the corrected target.
