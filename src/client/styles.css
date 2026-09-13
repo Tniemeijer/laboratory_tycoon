@@ -73,12 +73,23 @@ html, body {
 /* ---------- dropdown ---------- */
 #dropdown {
     position: absolute; top: 52px; left: 8px;
-    width: 340px; max-height: calc(100vh - 130px); overflow-y: auto;
+    /* min() rather than a media query for the width: the panel is positioned under whichever tab
+       opened it, so it just needs to never outgrow the window. Height reserves the 52px top bar
+       plus enough to clear the camera buttons in the bottom corner, and no more. */
+    width: min(380px, calc(100vw - 24px));
+    max-height: calc(100vh - 96px);
+    overflow-y: auto; overscroll-behavior: contain;
     background: var(--panel);
     border: 3px solid var(--edge);
     box-shadow: inset 0 0 0 2px var(--edge-lite), 4px 4px 0 rgba(0,0,0,0.25);
     padding: 10px;
 }
+/* Build is a grid of machine cards rather than a column of prose, so it earns much more width —
+   more cards per row is what keeps the list from turning into one long scroll. */
+#dropdown[data-menu="build"] { width: min(700px, calc(100vw - 24px)); }
+/* Help is a wall of prose — a wider column roughly halves how far it scrolls. */
+#dropdown[data-menu="help"] { width: min(560px, calc(100vw - 24px)); }
+#dropdown[data-menu="build"] .grid { grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); }
 #dropdown-close {
     position: absolute; top: 6px; right: 6px; z-index: 1;
     width: 22px; height: 22px; line-height: 18px; padding: 0;
@@ -169,6 +180,13 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
 .reg.buy { align-items: flex-start; }
 .reg.buy span { padding-top: 2px; }
 .reg .buyb { width: auto; flex: none; margin: 0; padding: 4px 8px; white-space: nowrap; }
+.reg .buyb.poor { color: var(--red); }
+.reg .up { color: var(--red); }        /* a price going up is bad news for you */
+.reg .down { color: var(--green); }
+
+.loan-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.loan-row .adj { width: auto; flex: none; margin: 0; padding: 4px 12px; font-size: 14px; line-height: 1; }
+.loan-amt { flex: 1; text-align: center; font-size: 13px; }
 
 .meter-lbl { font-size: 12px; margin-bottom: 3px; }
 .meter-lbl b.good { color: var(--green); }
@@ -220,6 +238,16 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
    3D screen coordinates. The 3D scene itself renders at low internal resolution for the pixel-art
    look (great for chunky geometry, unreadable for small baked-in text), so speech bubbles are
    deliberately NOT a 3D sprite/texture — this is the only way the words stay crisp. */
+/* Run progress, floating over a working machine. A DOM element rather than geometry in the scene
+   so it stays sharp — the 3D pass is deliberately rendered at low resolution. */
+.task-bar {
+    position: absolute; transform: translate(-50%, -50%);
+    width: 44px; height: 8px; z-index: 5; pointer-events: none;
+    background: #2a2f33; border: 2px solid var(--edge);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
+}
+.task-bar i { display: block; height: 100%; background: #54d67a; transition: width 0.1s linear; }
+
 .speech-bubble {
     position: absolute; transform: translate(-50%, -100%);
     background: var(--panel); border: 3px solid var(--edge);
@@ -241,7 +269,13 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
 #dropdown::-webkit-scrollbar-thumb { background: var(--btn); border: 1px solid var(--edge); }
 
 @media (max-width: 560px) {
-    #dropdown { width: calc(100vw - 24px); }
+    /* Phones are the one place the vertical fit actually breaks: vh there measures the viewport
+       with the URL bar hidden, so a vh-tall panel runs off the bottom of the screen, and the hint
+       line, rotate buttons and toast all need clearance too. Desktop keeps plain vh above. */
+    #dropdown, #dropdown[data-menu="build"] {
+        max-height: calc(100vh - 190px);
+        max-height: calc(100dvh - 190px);
+    }
     .grid { grid-template-columns: 1fr; }
 
     #bar { gap: 4px; padding: 5px 6px; }

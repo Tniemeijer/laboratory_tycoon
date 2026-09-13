@@ -14,7 +14,7 @@ import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyU
 import { GRID, tileToWorld, worldToTile, footTiles, restTile, gateWorld } from '../grid.js';
 import { aStar, nearestAccess } from '../pathfind.js';
 import { addDirt, recomputeGrime, topDirtTile } from './dirt.js';
-import { curStep } from './samples.js';
+import { curStep, isInert } from './samples.js';
 import { completeContract } from './contracts.js';
 import {
     stageSample, batchReady, startRun, findBrokenEquipment, findNeedsMaintenance, finishRepair, finishMaintenance
@@ -128,6 +128,36 @@ function grantSkillXp(w, cap, n) {
     w.skillXp[cap] = (w.skillXp[cap] || 0) + SKILL_XP_PER_RUN + SKILL_XP_PER_EXTRA_SAMPLE * (n - 1);
 }
 
+// Which way a machine faces. The models are all built facing +z and then turned by
+// `rotation.y = -rot * PI/2` (see _applyEquipTransform), so this is that same mapping in tiles.
+const FRONT_OFFSET = [[0, 1], [-1, 0], [0, -1], [1, 0]];
+function frontTiles(e) {
+    const [dx, dz] = FRONT_OFFSET[(e.rot || 0) % 4];
+    const foot = footTiles(e.type, e.tx, e.tz, e.rot);
+    const own = new Set(foot.map(([x, z]) => `${x},${z}`));
+    const out = [];
+    for (const [x, z] of foot) {
+        const nx = x + dx, nz = z + dz;
+        if (!own.has(`${nx},${nz}`)) out.push([nx, nz]);
+    }
+    return out;
+}
+// Where a worker should stand to use this machine. Strongly prefers the front — the side the door,
+// screen or hatch is actually on — because picking whichever tile merely happened to be nearest
+// had staff working fridges through the back panel. Falls back to any reachable side rather than
+// refusing the job outright, so a machine shoved against a wall still gets used.
+function accessTile(e, from) {
+    const nv = nav();
+    let best = null, bestLen = Infinity;
+    for (const [x, z] of frontTiles(e)) {
+        if (x < 0 || z < 0 || x >= GRID || z >= GRID || nv[z * GRID + x]) continue;
+        const p = aStar(nv, GRID, GRID, from.tx, from.tz, x, z);
+        if (p && p.length < bestLen) { bestLen = p.length; best = [x, z]; }
+    }
+    if (best) return best;
+    return nearestAccess(nv, GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+}
+
 function freeSlots(e) { return (BUILD[e.type].slots || 0) - (e.processing ? e.processing.length : 0) - (e.reserved || 0); }
 function stationsFor(cap) { return G.state.equipment.filter(e => equipCaps(e).includes(cap)); }
 // A station's batch capacity is shared across every cap it serves — a bench holding 3 samples
@@ -162,7 +192,7 @@ function bestStation(cap, w) {
     const from = worldToTile(w.wx, w.wz);
     let best = null, score = Infinity;
     for (const e of list) {
-        const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+        const acc = accessTile(e, from);
         if (!acc) continue;
         const p = aStar(nav(), GRID, GRID, from.tx, from.tz, acc[0], acc[1]);
         const len = p ? p.length : 999;
@@ -227,7 +257,7 @@ function assignMechanicJob(w) {
     if (G.state.money >= MECH_REPAIR_COST) {
         for (const e of findBrokenEquipment()) {
             if (e.fixClaim != null) continue;
-            const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+            const acc = accessTile(e, from);
             if (!acc) continue;
             e.fixClaim = w.id;
             w.job = { fixId: e.id };
@@ -237,7 +267,7 @@ function assignMechanicJob(w) {
     }
     for (const e of findNeedsMaintenance()) {
         if (e.fixClaim != null) continue;
-        const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+        const acc = accessTile(e, from);
         if (!acc) continue;
         e.fixClaim = w.id;
         w.job = { fixId: e.id };
@@ -263,7 +293,7 @@ function findReadyBatchJob(w) {
         if (BUILD[e.type].autoStart || e.operateClaim != null) continue;   // starts itself — see updateEquipment()
         const group = batchReady(e);
         if (!group) continue;
-        const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+        const acc = accessTile(e, from);
         if (!acc) continue;
         e.operateClaim = w.id;
         w.job = { operateId: e.id };
@@ -297,6 +327,7 @@ function assignJob(w) {
         let candidate = null, bestCandScore = -Infinity;
         for (const x of s.samples) {
             if (x.state !== 'queued' || x.claimedBy || x.storedAt) continue;
+            if (isInert(x)) continue;   // a report can't spoil — shelving one wastes a trip and a shelf
             if (!(x.fresh < COLD_STORE_THRESHOLD || !anyStationWantsMore(curStep(x).cap))) continue;
             const score = samplePriority(x);
             if (score > bestCandScore) { bestCandScore = score; candidate = x; }
@@ -305,7 +336,7 @@ function assignJob(w) {
             const from = worldToTile(w.wx, w.wz);
             for (const e of s.equipment) {
                 if (BUILD[e.type].kind !== 'cold' || freeSlots(e) <= 0) continue;
-                const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+                const acc = accessTile(e, from);
                 if (!acc) continue;
                 candidate.claimedBy = w.id;
                 e.reserved = (e.reserved || 0) + 1;
@@ -322,7 +353,7 @@ function assignJob(w) {
         const from = worldToTile(w.wx, w.wz);
         for (const e of s.equipment) {
             if (BUILD[e.type].kind !== 'water' || freeSlots(e) <= 0) continue;
-            const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+            const acc = accessTile(e, from);
             if (!acc) continue;
             e.reserved = (e.reserved || 0) + 1;
             w.reservedStation = e.id;
@@ -337,7 +368,7 @@ function assignJob(w) {
             const from = worldToTile(w.wx, w.wz);
             for (const e of s.equipment) {
                 if (!equipCaps(e).includes('prep') || freeSlots(e) <= 0) continue;
-                const acc = nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), from.tx, from.tz);
+                const acc = accessTile(e, from);
                 if (!acc) continue;
                 const ing = REAGENTS[rk].ingredient;
                 if ((s.ingredients[ing] || 0) < REAGENT_BATCH || s.water < REAGENT_WATER_COST) break;   // depleted since reagentToPrep() checked
@@ -384,7 +415,7 @@ export function updateStaff(dt) {
                     // away meant they'd often be turned right back around a second later.
                     w.idleTimer = (w.idleTimer || 0) + dt;
                     if (w.idleTimer > IDLE_GRACE_PERIOD) {
-                        const [rx, rz] = restTile(restIdx++); setGoalTile(w, [rx, rz]); w.state = 'resting';
+                        const [rx, rz] = restTile(s, restIdx++); setGoalTile(w, [rx, rz]); w.state = 'resting';
                         w.idleTimer = 0;
                     }
                 }

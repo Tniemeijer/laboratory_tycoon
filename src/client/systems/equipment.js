@@ -15,9 +15,11 @@ import {
     BUILD, PROTOCOLS, REAGENTS,
     BATCH_MAX_WAIT, BATCH_TIME_PER_EXTRA,
     WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE, COND_SLOW_THRESHOLD, COND_SLOW_MAX,
-    COND_BREAKDOWN_THRESHOLD, COND_BREAKDOWN_CHANCE_MAX, MECH_MAINT_THRESHOLD, MECH_MAINT_GAIN
+    COND_BREAKDOWN_THRESHOLD, COND_BREAKDOWN_CHANCE_MAX, MECH_MAINT_THRESHOLD, MECH_MAINT_GAIN,
+    ROOM_QUALITY_BONUS, SUPPLIES, SUPPLY_FOR_CAP
 } from '../data.js';
-import { G, cleanliness, speedMul, hasCleanroom, dirtyUI } from '../core.js';
+import { G, cleanliness, speedMul, insideAnyRoom, dirtyUI } from '../core.js';
+import { takeStock } from './economy.js';
 import { addDirt } from './dirt.js';
 import { completeContract } from './contracts.js';
 
@@ -86,11 +88,29 @@ export function startRun(st, group) {
     const n = samples.length;
     if (!n) return null;
 
+    // Consumables for this run. Per-sample items scale with the batch; the expensive per-run ones
+    // (a flow cell, a column) are charged once no matter how full the machine is, which is exactly
+    // why it's worth waiting for a fuller batch. Running short doesn't stop the work — it's
+    // improvised, slower and messier, same as running out of reagent.
+    const needed = ['disposable'];
+    if (SUPPLY_FOR_CAP[cap]) needed.push(SUPPLY_FOR_CAP[cap]);
+    let short = null;
+    for (const key of needed) {
+        const want = SUPPLIES[key].perSample ? n : 1;
+        if (!takeStock(key, want)) short = short || key;
+    }
+    if (short && !s.warns['nosup_' + short]) {
+        s.warns['nosup_' + short] = 1;
+        G.onToast(`Out of ${SUPPLIES[short].name} — improvising, slower and messier`, true);
+    }
+
     const clFactor = cleanliness() / 100;
     let dur = step.t * (b.timeMul[cap] || 1) * speedMul();
     dur *= 1 + 0.45 * (1 - clFactor);
     dur *= 1 + BATCH_TIME_PER_EXTRA * (n - 1);
     const condition = st.condition ?? 100;
+    if (short) dur *= 1.4;
+    const inRoom = insideAnyRoom(st);
     if (condition < COND_SLOW_THRESHOLD) dur *= 1 + (COND_SLOW_THRESHOLD - condition) / COND_SLOW_THRESHOLD * COND_SLOW_MAX;
 
     for (const sm of samples) {
@@ -101,10 +121,11 @@ export function startRun(st, group) {
                 G.onToast(`Out of ${REAGENTS[step.reagent].name} — quality will suffer`, true);
             }
         }
+        if (short) sm.quality *= 0.82;
         if (cleanliness() < 55) sm.quality *= 0.92;
-        // A Cleanroom anywhere in the lab cuts contamination risk lab-wide, not just for pharma
-        // work run inside one — a modest, flat nudge rather than gating quality behind it too.
-        if (hasCleanroom()) sm.quality = Math.min(1, sm.quality * 1.03);
+        // Anything run on a machine standing inside a room — any room — is controlled-environment
+        // work and comes out that bit cleaner. Checked once per run rather than per sample.
+        if (inRoom) sm.quality = Math.min(1, sm.quality * ROOM_QUALITY_BONUS);
         sm.state = 'processing';
     }
 
@@ -156,11 +177,9 @@ function finishRun(st, p) {
 export function updateEquipment(dt) {
     for (const st of G.state.equipment) {
         const b = BUILD[st.type];
-        // Only actual "machines" wear/batch/break — checked by category, not current caps: a
-        // Scale/Chromatograph outside a Cleanroom has no active caps at all (see equipCaps() in
-        // core.js) but must still tick any run it already started to completion and still wears
-        // down from it, so this can't depend on whether its room-gated caps happen to be live
-        // right now.
+        // Only actual "machines" wear/batch/break — checked by category rather than by caps, so
+        // that a run already under way still ticks to completion (and still wears the machine
+        // down) even if the room granting its cap gets sold out from under it mid-run.
         if (b.cat !== 'Processing') continue;
         if (st.staged && st.staged.length) {
             for (const g of st.staged) g.wait += dt;

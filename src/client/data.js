@@ -5,42 +5,57 @@
 
 export const CAP_LABEL = {
     prep: 'Prep', spin: 'Spin', image: 'Image', incubate: 'Incubate', analyze: 'Analyze',
-    chroma: 'Chroma', weigh: 'Weigh', fluoresce: 'Fluoresce', prep_bio: 'Culture Prep', prep_chem: 'Chem Prep'
+    chroma: 'Chroma', weigh: 'Weigh', fluoresce: 'Fluoresce', prep_bio: 'Culture Prep', prep_chem: 'Chem Prep',
+    prep_contain: 'Contained Prep', sequence: 'Sequence', compute: 'Compute'
 };
+
+// Steps that handle data and paperwork rather than living material. A sample waiting on one of
+// these is a report or a pile of reads — there is nothing left in it to rot, so it's exempt from
+// spoilage entirely and staff won't waste a fridge shelf or a trip refrigerating one.
+export const INERT_CAPS = ['analyze', 'compute'];
 
 export const BUILD = {
     bench:      { name: 'Lab Bench',     cost: 550,  cat: 'Processing', caps: ['prep', 'analyze'],
                   timeMul: { prep: 1.0, analyze: 2.2 }, slots: 1, batch: 3, attended: true, foot: [1, 1], hold: 4, minLevel: 1,
                   desc: 'Preps samples and runs slow analysis. Holds up to 3 samples per run — drop several off and they run together. Hands-on work: a scientist has to stay at the bench for the whole run, unlike automated equipment.' },
-    preprobot:  { name: 'Prep Robot',    cost: 4200, cat: 'Processing', caps: ['prep'],
-                  timeMul: { prep: 0.9 }, slots: 1, batch: 3, autoStart: true, foot: [2, 1], minLevel: 3,
-                  desc: 'Automated prep — starts itself once enough samples are loaded, no scientist needed to run it. A benchtop liquid-handling deck with an XY gantry. Rating 3.' },
+    preprobot:  { name: 'Prep Robot',    cost: 4200, cat: 'Processing', caps: ['prep', 'prep_chem'],
+                  timeMul: { prep: 0.9, prep_chem: 1.0 }, slots: 1, batch: 3, autoStart: true, foot: [2, 1], minLevel: 3,
+                  desc: 'Automated prep — starts itself once enough samples are loaded, no scientist needed to run it. A liquid-handling deck with an XY gantry, sealed in an extracted glass enclosure, so it handles hazardous Chem Prep as well as routine prep. Rating 3.' },
     microscope: { name: 'Microscope',    cost: 1300, cat: 'Processing', caps: ['image'],
-                  timeMul: { image: 1.0, fluoresce: 1.2 }, slots: 1, foot: [1, 1], minLevel: 1,
-                  desc: 'Imaging step, one sample at a time. Wheel it next to a Dark Room and it can run fluorescence imaging too.' },
+                  timeMul: { image: 1.0, fluoresce: 1.2 }, slots: 1, attended: true, foot: [1, 1], minLevel: 1,
+                  desc: 'Imaging step, one sample at a time. Someone has to sit at the eyepiece and actually read the slide, so it ties a scientist up for the whole run. Stand it inside a Dark Room and it can run fluorescence imaging too.' },
     centrifuge: { name: 'Centrifuge',    cost: 1900, cat: 'Processing', caps: ['spin'],
                   timeMul: { spin: 1.0 }, slots: 1, batch: 4, foot: [1, 1], minLevel: 2,
                   desc: 'Spin step. A real rotor — holds 4 samples per run. Needs Lab Rating 2.' },
     incubator:  { name: 'Incubator',     cost: 2400, cat: 'Processing', caps: ['incubate'],
                   timeMul: { incubate: 1.0 }, slots: 4, foot: [1, 2], minLevel: 2,
                   desc: 'Incubation step. Multiple shelves — up to 4 techs can load it at once. Rating 2.' },
+    sequencer:  { name: 'DNA Sequencer', cost: 9500, cat: 'Processing', caps: ['sequence'],
+                  timeMul: { sequence: 1.0 }, slots: 1, batch: 4, foot: [2, 2], minLevel: 4,
+                  desc: 'High-throughput sequencing for genomics work. Far and away the priciest thing in the catalogue, and slow per run — but it reads a full flow cell of 4 samples at once, so it earns its keep on volume. Rating 4.' },
+    analysisdesk: { name: 'Analysis Desk', cost: 950, cat: 'Processing', caps: ['analyze'],
+                  timeMul: { analyze: 0.85 }, slots: 1, batch: 2, attended: true, foot: [1, 1], minLevel: 1,
+                  desc: 'A desk and a computer for writing reports up properly — far quicker than squinting at one on a lab bench, though a scientist has to sit there for the whole run. 2 reports at a time.' },
+    serverrack: { name: 'Server Rack',   cost: 3800, cat: 'Processing', caps: ['compute'],
+                  timeMul: { compute: 1.0 }, slots: 1, batch: 4, autoStart: true, autoFeed: true, foot: [1, 1], minLevel: 4,
+                  desc: 'Crunches raw sequencer output into something a human can read. Reads travel over the network, so nobody carries anything and nobody starts it — samples land here on their own. 4 at a time. Rating 4.' },
     analyzer:   { name: 'Auto-Analyzer', cost: 4000, cat: 'Processing', caps: ['analyze'],
                   timeMul: { analyze: 0.7 }, slots: 1, batch: 2, foot: [2, 2], minLevel: 3,
                   desc: 'Fast, dedicated analysis. Runs 2 samples per batch. Rating 3.' },
-    scale:      { name: 'Scale',         cost: 420,  cat: 'Processing', caps: ['weigh'], requiresRoom: 'sterile',
+    scale:      { name: 'Scale',         cost: 420,  cat: 'Processing', caps: ['weigh'],
                   timeMul: { weigh: 1.0 }, slots: 1, batch: 3, foot: [1, 1], minLevel: 1,
-                  desc: "Precision balance for dosing and QC mass checks. Only works wheeled inside a Cleanroom — pharma-grade weighing can't happen on the open floor. Quick — holds up to 3 samples per run." },
-    chromatograph: { name: 'Chromatograph', cost: 3200, cat: 'Processing', caps: ['chroma'], requiresRoom: 'sterile',
-                  timeMul: { chroma: 1.0 }, slots: 1, batch: 2, foot: [2, 1], minLevel: 3,
-                  desc: "HPLC/GC separation and detection for chemical analysis. Only works wheeled inside a Cleanroom. Runs 2 samples per batch. Rating 3." },
+                  desc: 'Precision balance for dosing and QC mass checks. Works anywhere on the floor. Quick — holds up to 3 samples per run.' },
+    chromatograph: { name: 'Chromatograph', cost: 3200, cat: 'Processing', caps: ['analyze'],
+                  timeMul: { analyze: 0.8, chroma: 1.0 }, slots: 1, batch: 2, foot: [2, 1], minLevel: 3,
+                  desc: 'HPLC/GC separation and detection — a fast dedicated analyser wherever you put it. Stand it in a Cleanroom and it also runs pharma-grade Chroma work. 2 samples per batch. Rating 3.' },
     flowhood:   { name: 'Flow Hood',     cost: 1200, cat: 'Processing', caps: ['prep_bio'],
-                  timeMul: { prep_bio: 1.0 }, slots: 1, batch: 3, attended: true, foot: [1, 1], minLevel: 2,
-                  desc: "Sterile laminar-airflow cabinet for prep work involving live cultures — required for cultivation-based protocols; a regular bench won't do. Prep only, no analysis. Works like a bench: a scientist stays for the whole run. Rating 2." },
+                  timeMul: { prep_bio: 1.0, prep_contain: 1.2 }, slots: 1, batch: 3, attended: true, foot: [1, 1], minLevel: 2,
+                  desc: "Sterile laminar-airflow cabinet for live-culture prep — a regular bench won't do. Standing inside a Containment Lab it also handles contained work with biological and genetically modified agents. Prep only, and a scientist stays for the whole run. Rating 2." },
     fumehood:   { name: 'Fume Hood',     cost: 750,  cat: 'Processing', caps: ['prep_chem'],
                   timeMul: { prep_chem: 1.0 }, slots: 1, batch: 3, attended: true, foot: [1, 1], minLevel: 1,
-                  desc: "Ventilated cabinet for prep work with toxic, acidic, or caustic chemicals — required wherever a protocol calls for it; a regular bench won't do. Prep only, no analysis. Works like a bench: a scientist stays for the whole run." },
-    darkroom:   { name: 'Dark Room',     cost: 4200, cat: 'Utility', kind: 'dark', room: true, foot: [4, 4], minLevel: 3,
-                  desc: "A 4×4 light-sealed room — it doesn't process anything itself. Any Microscope wheeled inside can run fluorescence imaging as well as regular imaging. Place another Dark Room next to this one to cover more floor. Rating 3." },
+                  desc: "Ventilated cabinet for prep with toxic, acidic or caustic chemicals — a regular bench won't do. Prep only, and a scientist stays for the whole run." },
+    darkroom:   { name: 'Dark Room',     cost: 1500, cat: 'Utility', kind: 'dark', room: true, foot: [2, 2], minLevel: 3,
+                  desc: "A 2×2 light-sealed room — floor you build on, not furniture. A Microscope standing inside also runs fluorescence imaging. Lay another flush alongside to grow the room. Rating 3." },
     fridge:     { name: 'Fridge',        cost: 850,  cat: 'Storage', kind: 'cold', slots: 4, foot: [1, 1], minLevel: 1,
                   desc: 'Cold storage for perishable samples — 4 shelves, several staff can use it at once.' },
     freezer:    { name: 'Freezer',       cost: 2400, cat: 'Storage', kind: 'cold', slots: 6, foot: [1, 2], minLevel: 2,
@@ -49,8 +64,10 @@ export const BUILD = {
                   desc: 'Cleaners restock here and mop ~40% faster nearby.' },
     sink:       { name: 'Sink',          cost: 700,  cat: 'Utility', kind: 'water', slots: 1, foot: [1, 1], minLevel: 1,
                   desc: 'Distilled/demineralized water for reagent prep, and glassware washing — mop ~40% faster nearby.' },
-    cleanroom:  { name: 'Cleanroom',     cost: 6500, cat: 'Utility', kind: 'sterile', room: true, foot: [4, 4], minLevel: 4,
-                  desc: 'A 4×4 sealed, filtered room. A Scale or Chromatograph only runs pharma-grade work when wheeled inside one — the open floor won\'t do. Its presence also quietly cuts contamination risk lab-wide. Place another Cleanroom next to this one to cover more floor. Rating 4.' }
+    containment: { name: 'Containment Lab', cost: 1900, cat: 'Utility', kind: 'contain', room: true, foot: [2, 2], minLevel: 2,
+                  desc: "A 2×2 sealed, negative-pressure room for work with biological and genetically modified agents. A Flow Hood standing inside one handles contained work that can't be done on the open floor. Lay another flush alongside to grow it. Rating 2." },
+    cleanroom:  { name: 'Cleanroom',     cost: 2400, cat: 'Utility', kind: 'sterile', room: true, foot: [2, 2], minLevel: 4,
+                  desc: "A 2×2 sealed, filtered room — floor you build on. A Chromatograph only runs pharma-grade work while standing inside one. Also cuts contamination risk lab-wide. Lay another flush alongside to grow it. Rating 4." }
 };
 
 // Raw materials — shelf-stable, bought in bulk, converted into reagents at a bench.
@@ -59,6 +76,39 @@ export const INGREDIENTS = {
     solventBase: { name: 'Solvent Base',  unit: 'units', cost: 18 },
     bufferMix:   { name: 'Buffer Mix',    unit: 'units', cost: 25 }
 };
+
+// Consumables bought ready-made rather than crafted: no water, no bench time, they're just
+// *used up* by the runs that need them. Two shapes, and the difference is the whole point of the
+// system — `perSample` items scale with how much work you do, while the expensive `perRun` ones
+// are charged once however full the machine was, so a sequencer run with one sample in it burns
+// the same £200 flow cell as a run with four. That's what makes filling a batch worth waiting for.
+export const SUPPLIES = {
+    disposable: { name: 'Disposables',     unit: 'packs', cost: 6,   perSample: true,  caps: null },
+    slide:      { name: 'Slides',          unit: 'boxes', cost: 15,  perSample: true,  caps: ['image'] },
+    fluorlabel: { name: 'Fluor. Labels',   unit: 'vials', cost: 48,  perSample: true,  caps: ['fluoresce'] },
+    column:     { name: 'HPLC Columns',    unit: 'ea',    cost: 95,  perSample: false, caps: ['chroma'] },
+    flowcell:   { name: 'Flow Cells',      unit: 'ea',    cost: 220, perSample: false, caps: ['sequence'] }
+};
+// Which supply a given protocol step burns, on top of the disposables every run gets through.
+export const SUPPLY_FOR_CAP = (() => {
+    const m = {};
+    for (const [key, s] of Object.entries(SUPPLIES)) for (const c of (s.caps || [])) m[c] = key;
+    return m;
+})();
+
+// Suppliers quote a fresh price every morning: a random walk that's pulled gently back towards the
+// list price, so it wanders without ever running away. Buying the week's solvent while it's cheap
+// is the point — and the reason orders aren't instant (see ORDER_LEAD_DAYS) is so you have to call
+// it before you know what work is coming.
+export const PRICE_DRIFT = 0.11;      // how far a day's move can swing
+export const PRICE_PULL = 0.08;       // how strongly it's tugged back to 1.0
+export const PRICE_MIN = 0.68, PRICE_MAX = 1.45;
+export const ORDER_LEAD_DAYS = 1;     // ordered today, on the shelf tomorrow morning
+// Stockroom space. Everything you're holding — ingredients and supplies alike — takes a slot, and
+// anything already on order has its slot reserved, so you can't paper over a full stockroom by
+// ordering more. Hoarding cheap stock therefore costs you the room to hoard anything else.
+export const STOCK_BASE_CAPACITY = 70;
+export const STOCK_PER_UPGRADE = 45;
 
 // Stock solutions — crafted from an ingredient plus distilled water, perish after `shelf` days.
 export const REAGENTS = {
@@ -70,6 +120,12 @@ export const REAGENT_BATCH = 3;       // units made & consumed per prep run
 export const REAGENT_MIN = 3;
 export const REAGENT_PREP_TIME = 8;
 export const REAGENT_WATER_COST = 2;  // units of distilled water a prep run consumes
+
+// Distilled water can also just be bought in, delivered like any other stock. A Sink makes it
+// free forever, so buying it is the expensive way out — but without that escape hatch a lab with
+// no Sink has no water, so no reagents, and every prep step limps along on the missing-reagent
+// penalty with no way for the player to dig themselves out.
+export const WATER_ITEM = { name: 'Distilled Water', unit: 'units', cost: 5 };
 
 // Distilled water — free to make (just tap + a Sink + time), but still a real bottleneck:
 // no sink, no water, no reagents.
@@ -121,14 +177,21 @@ export const MECH_MAINT_GAIN = 35;
 export const MECH_REPAIR_TIME = 10;
 export const MECH_REPAIR_COST = 45;
 
-// Some rooms grant a machine physically placed inside them an extra capability instead of doing
-// any processing themselves — a Dark Room doesn't image anything on its own, but a Microscope
-// standing on one of its tiles can also run fluorescence steps. Keyed by the room's `kind`, then
-// by the machine `type` it applies to, to the cap it grants. Separately, BUILD[type].requiresRoom
-// gates a machine's OWN caps entirely behind being inside a room of that kind (see Scale/
-// Chromatograph + Cleanroom below) rather than adding an extra one. Both go through equipCaps() in
-// core.js, which checks actual tile overlap with the room's footprint — not mere proximity.
-export const ROOM_BONUS_CAP = { dark: { microscope: 'fluoresce' } };
+// Rooms only ever ADD to a machine, never gate it: every machine does its own job perfectly well
+// standing on the open floor, and a room grants whatever extra a controlled environment buys you
+// — fluorescence imaging in a light-sealed Dark Room, pharma-grade chromatography in a Cleanroom,
+// contained culture work in a Containment Lab. Keyed by the room's `kind`, then by the
+// machine `type` it applies to, to the cap it grants. equipCaps() in core.js resolves it against
+// actual tile overlap with the room's footprint, not mere proximity.
+export const ROOM_BONUS_CAP = {
+    dark:    { microscope: 'fluoresce' },
+    sterile: { chromatograph: 'chroma' },
+    contain: { flowhood: 'prep_contain' }
+};
+// On top of any cap it grants, working inside a room is simply better-controlled work: every run
+// on a machine standing in one comes out a little cleaner. This is the "compliance" half of what
+// a room buys you, and it applies to every kind.
+export const ROOM_QUALITY_BONUS = 1.05;
 
 // Per-scientist skill growth: whoever actually walks up and starts a run gets credit for it —
 // each completed run raises that worker's skill at that specific task (cap), a little faster with
@@ -145,8 +208,10 @@ export const SKILL_QUALITY_PER_LEVEL = 0.015;    // +1.5% quality per level at t
 /** @type {Record<string, {name:string, minLevel:number, steps:ProtocolStep[]}>} */
 // A protocol's prep step uses the generic 'prep' cap (any Bench or Prep Robot) unless the work
 // itself demands a specialized cabinet — live-culture work needs 'prep_bio' (Flow Hood only),
-// hazardous chemistry needs 'prep_chem' (Fume Hood only). Neither hood can substitute for the
-// other, and neither is a Bench replacement for anything else — see BUILD.flowhood/fumehood.
+// hazardous chemistry needs 'prep_chem' (Fume Hood only), and work with agents that have to be
+// contained needs 'prep_contain' — the same Flow Hood, but only while it stands in a Containment Lab.
+// Neither hood can substitute for the other, and neither is a Bench replacement for anything else
+// — see BUILD.flowhood/fumehood.
 export const PROTOCOLS = {
     chem:   { name: 'Chemical', minLevel: 1, steps: [
                 { cap: 'prep_chem', t: 5, reagent: 'solvent' }, { cap: 'analyze', t: 6 } ] },
@@ -154,20 +219,35 @@ export const PROTOCOLS = {
                 { cap: 'prep', t: 6 }, { cap: 'image', t: 7 }, { cap: 'analyze', t: 6 } ] },
     blood:  { name: 'Blood',    minLevel: 2, steps: [
                 { cap: 'prep', t: 5, reagent: 'saline' }, { cap: 'spin', t: 6 }, { cap: 'analyze', t: 5 } ] },
-    virus:  { name: 'Virus',    minLevel: 2, steps: [
-                { cap: 'prep_bio', t: 6 }, { cap: 'incubate', t: 12 }, { cap: 'analyze', t: 6 } ] },
+    culture: { name: 'Cell Culture', minLevel: 2, steps: [
+                { cap: 'prep_bio', t: 6 }, { cap: 'incubate', t: 10 }, { cap: 'analyze', t: 6 } ] },
+    // Live viral agents are containment work: a Flow Hood on the open floor handles plain culture
+    // fine, but this asks for one standing inside a Containment Lab.
+    virus:  { name: 'Virus',    minLevel: 3, steps: [
+                { cap: 'prep_contain', t: 6 }, { cap: 'incubate', t: 12 }, { cap: 'analyze', t: 6 } ] },
     dna:    { name: 'DNA',      minLevel: 3, steps: [
                 { cap: 'prep', t: 7, reagent: 'buffer' }, { cap: 'spin', t: 5 },
                 { cap: 'image', t: 6 }, { cap: 'analyze', t: 5 } ] },
+    // The DNA panel above stays gel-and-scope work any mid-size lab can take on. This is the
+    // premium version of the same job: it wants a real sequencer, and the run is long enough that
+    // filling the flow cell (batch 4) is the whole point of owning one.
+    genome: { name: 'Genome',   minLevel: 4, steps: [
+                { cap: 'prep', t: 7, reagent: 'buffer' }, { cap: 'spin', t: 5 },
+                { cap: 'sequence', t: 14 }, { cap: 'compute', t: 8 }, { cap: 'analyze', t: 7 } ] },
     immuno: { name: 'Immunofluorescence', minLevel: 3, steps: [
                 { cap: 'prep', t: 6, reagent: 'buffer' }, { cap: 'incubate', t: 10 },
                 { cap: 'fluoresce', t: 9 }, { cap: 'analyze', t: 6 } ] },
-    // No explicit gate needed — Scale/Chromatograph only expose 'weigh'/'chroma' at all once
-    // they're inside a Cleanroom (requiresRoom, see BUILD above), so this naturally can't be
-    // worked until the lab actually has one, same as any other missing-equipment protocol.
+    // 'chroma' only exists in a lab where a Chromatograph is standing inside a Cleanroom (see
+    // ROOM_BONUS_CAP), so this can't be worked until that's set up — same "missing machine"
+    // handling as any other protocol, no special gate needed.
     pharma: { name: 'Pharma',   minLevel: 4, steps: [
                 { cap: 'weigh', t: 3 }, { cap: 'prep_chem', t: 6, reagent: 'solvent' },
-                { cap: 'chroma', t: 9 }, { cap: 'analyze', t: 6 } ] }
+                { cap: 'chroma', t: 9 }, { cap: 'analyze', t: 6 } ] },
+    // Same gate-by-capability story as Pharma: 'prep_contain' simply doesn't exist in a lab until
+    // a Flow Hood is standing in a Containment Lab, so this can't be worked before one is up.
+    pathogen: { name: 'Pathogen', minLevel: 4, steps: [
+                { cap: 'prep_contain', t: 7 }, { cap: 'incubate', t: 12 },
+                { cap: 'image', t: 6 }, { cap: 'analyze', t: 7 } ] }
 };
 
 export const UPGRADES = {
@@ -177,7 +257,8 @@ export const UPGRADES = {
     staff:     { name: 'Staff Quarters',    base: 2200, mult: 2.0, max: 3, desc: '+2 scientist capacity per level' },
     clean:     { name: 'Cleaning Supplies', base: 1000, mult: 1.8, max: 4, desc: 'Slower grime buildup, faster mopping' },
     radio:     { name: 'Break Room Radio',  base: 1200, mult: 1.9, max: 3, desc: '+8% staff walking speed per level — expect complaints' },
-    cart:      { name: 'Sample Cart',       base: 1800, mult: 2.0, max: 3, desc: '+1 sample carried per trip per level' }
+    cart:      { name: 'Sample Cart',       base: 1800, mult: 2.0, max: 3, desc: '+1 sample carried per trip per level' },
+    storage:   { name: 'Stockroom',         base: 900,  mult: 1.8, max: 4, desc: `+${STOCK_PER_UPGRADE} units of stock space per level` }
 };
 
 // Purchasable lab plots. The building is a tall central hall (free, start owned, runs the full
@@ -199,8 +280,13 @@ export const UTIL_LIGHTING_PER_TILE = 0.1;
 // daily on whatever's still owed — worth paying down before it snowballs, though you can also
 // borrow more (at the same rate) if you need the runway to get going.
 export const START_LOAN = 5000;
-export const LOAN_INTEREST_RATE = 0.02;    // daily, compounding
+// Interest is billed in cash every LOAN_INTEREST_DAYS, and the principal never moves — what you
+// borrowed is what you owe, and servicing it is a recurring drain rather than a balance quietly
+// snowballing while you're not looking. The rate is per billing period, not per day.
+export const LOAN_INTEREST_RATE = 0.05;
+export const LOAN_INTEREST_DAYS = 5;
 export const LOAN_MAX = 60000;
+export const LOAN_STEP = 500;              // the − / + step on the borrow/repay amount
 export const LOAN_BORROW_STEP = 2000;
 export const LOAN_REPAY_STEP = 1000;
 

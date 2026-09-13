@@ -1,12 +1,15 @@
 // ==================== SAMPLE LIFECYCLE ====================
 
-import { PROTOCOLS, SAMPLE_DECAY_WARM, SPOIL_REP_PENALTY, SPOIL_MONEY_PENALTY } from '../data.js';
-import { G, nid, nav, coldDecayRate, cleanliness, dirtyUI } from '../core.js';
+import { BUILD, PROTOCOLS, SAMPLE_DECAY_WARM, SPOIL_REP_PENALTY, SPOIL_MONEY_PENALTY, INERT_CAPS } from '../data.js';
+import { G, nid, nav, coldDecayRate, cleanliness, equipCaps, dirtyUI } from '../core.js';
 import { GRID, tileToWorld, worldToTile, gateWorld, queueTile } from '../grid.js';
 import { nearestAccess } from '../pathfind.js';
-import { removeFromStaging } from './equipment.js';
+import { removeFromStaging, stageSample } from './equipment.js';
 
 export function curStep(sm) { return PROTOCOLS[sm.proto].steps[sm.step]; }
+// A sample that's become a written report (or raw sequencing data) has nothing left in it to
+// spoil — see INERT_CAPS. Used both to exempt it from decay and to keep staff from shelving it.
+export function isInert(sm) { const st = curStep(sm); return !!st && INERT_CAPS.includes(st.cap); }
 
 export function spawnSample(proto, contractId) {
     const g = gateWorld();
@@ -69,6 +72,26 @@ export function updateSamples(dt) {
         sm.wx = w.x; sm.wz = w.z;
     }
 
+    // Automatic hand-off: some stations take their input over the network rather than by hand (a
+    // Server Rack picking reads straight off the sequencer). A sample waiting on one of those
+    // doesn't need a scientist to walk it over — it lands in staging on its own, as long as the
+    // station has room left in its next run. Nothing claimed by a worker gets pulled out from
+    // under them.
+    for (const sm of s.samples) {
+        if (sm.state !== 'queued' || sm.claimedBy || sm.storedAt) continue;
+        const step = curStep(sm);
+        if (!step) continue;
+        for (const e of s.equipment) {
+            const b = BUILD[e.type];
+            if (!b.autoFeed || e.broken || !equipCaps(e).includes(step.cap)) continue;
+            if ((e.staged ? e.staged.length : 0) >= (b.batch || 1)) continue;
+            const w = tileToWorld(e.tx, e.tz);
+            sm.wx = w.x; sm.wz = w.z;
+            stageSample(e, sm);
+            break;
+        }
+    }
+
     const storedRate = coldDecayRate();
     for (const sm of s.samples.slice()) {           // snapshot: abandonSample() below mutates s.samples
         // Decay only bites before a sample is ever picked up (or while genuinely cold-stored,
@@ -78,6 +101,7 @@ export function updateSamples(dt) {
         // testing: a few samples stacked up mid-pipeline, a batch missed its window, replacements
         // spawned from the spoilage piled up right behind them, and so on.
         if (sm.state !== 'queued' || (sm.step > 0 && !sm.storedAt)) continue;
+        if (isInert(sm)) continue;   // a report doesn't rot, in the fridge or out of it
         sm.fresh -= (sm.storedAt ? storedRate : SAMPLE_DECAY_WARM) * dt;
         if (sm.fresh <= 0) {
             const c = s.contracts.find(x => x.id === sm.contractId);

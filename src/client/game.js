@@ -2,17 +2,18 @@
 // Owns the save file, the day/tick loop, and equipment placement. Gameplay systems live in
 // ./systems/*; this module wires them together and re-exports the public API the UI/scene use.
 
-import { BUILD, REAGENTS, INGREDIENTS, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, MECH_REPAIR_COST, START_LOAN, LOAN_INTEREST_RATE, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL } from './data.js';
+import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, MECH_REPAIR_COST, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL } from './data.js';
 import {
     G, nid, resetIdCounter, currentIdCounter, dirtyUI, bumpNav, nav,
-    labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps,
+    labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown
 } from './core.js';
-import { canPlace as gridCanPlace } from './grid.js';
+import { canPlace as gridCanPlace, tileToWorld } from './grid.js';
 import { refillOffers, acceptContract as acceptContractSys, failContract, checkContractArrivals } from './systems/contracts.js';
 import { spawnSample, abandonSample, updateSamples } from './systems/samples.js';
 import { updateStaff, hireStaff, toggleStaffCap } from './systems/staff.js';
-import { buyUpgrade, buyZone, buyIngredient, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan } from './systems/economy.js';
+import { buyUpgrade, buyZone, orderStock, driftPrices, deliverOrders, unitPrice, priceTrend, interestDue, nextInterestDay,
+         stockCapacity, stockUsed, stockFree, stockCount, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan } from './systems/economy.js';
 import { recomputeGrime } from './systems/dirt.js';
 import { updateEquipment } from './systems/equipment.js';
 
@@ -21,12 +22,14 @@ const SAVE_KEY = 'labTycoonSave.v4';
 
 // ---------- re-exports (the public API used by ui.js / threeScene.js) ----------
 export {
-    BUILD, REAGENTS, INGREDIENTS, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL,
+    BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL,
     WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, MECH_REPAIR_COST,
-    LOAN_INTEREST_RATE, LOAN_MAX, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL,
-    G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, nav,
+    LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP,
+    G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt, nav,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown,
-    hireStaff, toggleStaffCap, buyUpgrade, buyZone, buyIngredient, borrowLoan, repayLoan
+    hireStaff, toggleStaffCap, buyUpgrade, buyZone, borrowLoan, repayLoan,
+    orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
+    interestDue, nextInterestDay
 };
 export function acceptContract(id) { acceptContractSys(id, spawnSample); }
 
@@ -52,6 +55,10 @@ function fresh() {
         reagents: [],
         prepping: {},
         ingredients: { salineSalt: 6, solventBase: 6, bufferMix: 6 },
+        supplies: { disposable: 20, slide: 8 },
+        prices: {},                 // per-item multiplier on list price, drifts daily
+        prevPrices: {},
+        orders: [],                 // placed today, delivered on `day`
         water: 10,
         ownedZones: ZONES.filter(z => z.startOwned).map(z => z.id),
         dirt: {},
@@ -59,7 +66,7 @@ function fresh() {
         grime: 0,
         contaminationCooldown: 0,
         lastBill: 0,
-        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0 },
+        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0 },
         stats: { done: 0, failed: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0 },
         navVersion: 0,
         uiRev: 0,
@@ -89,6 +96,33 @@ export function placeEquipment(type, tx, tz, rot) {
     });
     bumpNav();
     G.onToast(`Built ${BUILD[type].name}`);
+    dirtyUI();
+    return true;
+}
+// Relocate a machine (or a room) that's already built, keeping everything it's holding. Free —
+// it's a reshuffle, not a purchase — and it deliberately doesn't care whether the machine is
+// mid-run: the run ticks on regardless, it just finishes somewhere else.
+export function moveEquipment(id, tx, tz, rot) {
+    const s = G.state;
+    const e = s.equipment.find(x => x.id === id);
+    if (!e) return false;
+    const r = rot == null ? e.rot : rot;
+    const chk = canPlace(e.type, tx, tz, r, e.id);       // ignoreId: it mustn't collide with itself
+    if (!chk.ok) { G.onToast(`Can't move there (${chk.why === 'unowned land' ? 'buy this plot first' : chk.why})`, true); return false; }
+    e.tx = tx; e.tz = tz; e.rot = r;
+    // Samples parked in its staging (or mid-run) travel with it — otherwise they'd pop back into
+    // existence at the machine's old spot the moment their run finished.
+    const aboard = new Set([...(e.staged || []).map(x => x.sampleId),
+                            ...(e.processing || []).flatMap(pp => pp.sampleIds || [pp.sampleId])]);
+    const w = tileToWorld(tx, tz);
+    for (const sm of s.samples) if (aboard.has(sm.id)) { sm.wx = w.x; sm.wz = w.z; }
+    // Anyone walking to this machine was headed for where it used to be, so hand them back to
+    // assignJob rather than letting them arrive at bare floor and wait there.
+    for (const wk of s.staff)
+        if (wk.job && (wk.job.stationId === id || wk.job.fixId === id || wk.job.operateId === id || wk.reservedStation === id))
+            G.releaseWorkerJob(wk);
+    bumpNav();
+    G.onToast(`Moved ${BUILD[e.type].name}`);
     dirtyUI();
     return true;
 }
@@ -143,6 +177,8 @@ function advanceTime(dt) {
         s.dayFrac -= 1; s.day++;
         applyDailyUtilities();
         applyDailyInterest();
+        deliverOrders();
+        driftPrices();
         checkContractArrivals(spawnSample);
         for (const c of s.contracts.slice()) if (s.day > c.deadline) failContract(c, abandonSample);
         s.offers = s.offers.filter(o => o.deadline > s.day + 1);
@@ -175,6 +211,7 @@ function loadSave() {
         // forever with nobody left who was ever going to mop it.
         s.dirtClaims = {};
         s.prepping ||= {}; s.ingredients ||= { salineSalt: 0, solventBase: 0, bufferMix: 0 };
+        s.supplies ||= {}; s.prices ||= {}; s.prevPrices ||= {}; s.orders ||= [];
         s.water ||= 0;
         if (s.loan == null) s.loan = 0;   // pre-existing saves started debt-free under the old economy
         if (s.coldStore == null) s.coldStore = true;
@@ -183,6 +220,9 @@ function loadSave() {
         if (s.upgrades.clean == null) s.upgrades.clean = 0;
         if (s.upgrades.radio == null) s.upgrades.radio = 0;
         if (s.upgrades.cart == null) s.upgrades.cart = 0;
+        if (s.upgrades.storage == null) s.upgrades.storage = 0;
+        // ML-1 / ML-2 were folded into a single Containment Lab; carry old ones across.
+        for (const e of s.equipment) if (e.type === 'ml1lab' || e.type === 'ml2lab') e.type = 'containment';
         for (const e of s.equipment) {
             e.processing = []; e.reserved = 0; e.rot = e.rot || 0; e.staged = [];
             if (e.condition == null) e.condition = 100;

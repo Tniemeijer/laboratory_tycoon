@@ -59,7 +59,6 @@ export function coldUsed() {
     return n;
 }
 export function coldDecayRate() { return SAMPLE_DECAY_STORED * Math.pow(0.85, G.state.upgrades.cold); }
-export function hasCleanroom() { return G.state.equipment.some(e => BUILD[e.type].kind === 'sterile'); }
 export function maxStaff() { return 3 + G.state.upgrades.staff * 2; }
 export function upgradeCost(k) {
     const u = UPGRADES[k];
@@ -72,26 +71,35 @@ function tilesOverlap(a, b) {
 // Is `e` standing on at least one tile of a room of this `kind`? Real tile overlap, not mere
 // proximity — "inside" means inside.
 function insideRoomKind(e, kind) {
-    return G.state.equipment.some(room => BUILD[room.type].kind === kind && BUILD[room.type].room && tilesOverlap(e, room));
+    return G.state.equipment.some(room => {
+        const def = BUILD[room.type];
+        return def.room && def.kind === kind && tilesOverlap(e, room);
+    });
 }
-// A machine's caps aren't always just whatever its BUILD entry lists statically:
-//  - BUILD[type].requiresRoom gates its OWN caps entirely behind standing inside a room of that
-//    kind — a Scale sitting on the open floor can't do pharma-grade weighing at all (see Scale/
-//    Chromatograph + Cleanroom).
-//  - ROOM_BONUS_CAP grants an EXTRA cap on top of whatever the machine already has — a Microscope
-//    still images fine anywhere, but standing inside a Dark Room adds fluorescence imaging too.
-// Every cap-lookup in the game (which stations can serve a given step, what the lab owns for the
-// Contracts chain display, etc.) goes through this instead of reading BUILD[e.type].caps directly,
-// so both effects are visible everywhere consistently.
+// Rooms render as floor rather than as a pickable model, so a click lands on the tile, not on the
+// room — this is how the UI gets from that tile back to the room covering it (to sell it, or to
+// describe it).
+export function roomAt(tx, tz) {
+    return G.state.equipment.find(e => BUILD[e.type].room &&
+        footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz)) || null;
+}
+// A machine always keeps the caps its BUILD entry lists — it works fine on the open floor, wherever
+// you put it. Standing inside a room only ever ADDS to that (ROOM_BONUS_CAP): a Microscope images
+// anywhere, and picks up fluorescence while it's in a Dark Room; a Chromatograph analyses anywhere,
+// and picks up pharma-grade chromatography while it's in a Cleanroom. Every cap-lookup in the game
+// (which stations can serve a step, what the lab owns for the Contracts chain display, …) goes
+// through this rather than reading BUILD[e.type].caps directly, so the bonuses show up everywhere.
 export function equipCaps(e) {
-    const def = BUILD[e.type];
-    let caps = def.caps || [];
-    if (def.requiresRoom) caps = insideRoomKind(e, def.requiresRoom) ? caps : [];
+    let caps = BUILD[e.type].caps || [];
     for (const [kind, grants] of Object.entries(ROOM_BONUS_CAP)) {
         const cap = grants[e.type];
         if (cap && !caps.includes(cap) && insideRoomKind(e, kind)) caps = [...caps, cap];
     }
     return caps;
+}
+// Work done inside any room is better-controlled work — see ROOM_QUALITY_BONUS in data.js.
+export function insideAnyRoom(e) {
+    return G.state.equipment.some(room => BUILD[room.type].room && tilesOverlap(e, room));
 }
 export function ownedCaps() {
     const set = new Set();

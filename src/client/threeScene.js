@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { BUILD, ZONES, PROTOCOLS, COND_BREAKDOWN_THRESHOLD } from './data.js';
 import {
-    GRID, BUILD_MAX_Z, BREAK_ROOM, COFFEE_TILE, WATER_COOLER_TILE, VENDING_TILE, TABLE_TILE,
+    GRID, BUILD_MAX_Z, BREAK_ROOM_MAX, breakRoom, breakRoomProps, roomAreas, roomDoorways,
     tileToWorld, footTiles, zoneAt, gateXRange
 } from './grid.js';
 
@@ -15,7 +15,10 @@ const ROTATE_COOLDOWN = 0.3;   // seconds between accepted camera-rotate inputs 
 // to gate the wall-safety clamp below without fighting legitimate walking lag at 2x/3x speed.
 // Notably excludes 'idle' and 'resting': both can still be mid-walk toward a rest tile.
 const STATIONARY_STATES = new Set(['mopping', 'atStation', 'prepping', 'filling', 'repairing', 'maintaining', 'operating', 'tending']);
-const PROTO_COLOR = { blood: 0xe0555f, tissue: 0x77c97b, chem: 0x5b8de8, virus: 0xf1d34a, dna: 0xb06cd9, immuno: 0x35d0ff, pharma: 0xf07a3c };
+const PROTO_COLOR = {
+    blood: 0xe0555f, tissue: 0x77c97b, chem: 0x5b8de8, virus: 0xf1d34a, dna: 0xb06cd9,
+    immuno: 0x35d0ff, pharma: 0xf07a3c, culture: 0x9fd36a, pathogen: 0xd94f7a, genome: 0x7a6cf0
+};
 // A sample's physical form follows whatever step it's headed into next, not just a tube the whole
 // way through — mounted on a slide once it's on its way to be imaged, turned into a written-up
 // report once it's on its way to be analyzed. Everything else (prep, spin, incubate) is still the
@@ -36,7 +39,7 @@ function sampleAppearance(sm) {
 const EQUIP_COLOR = {
     bench: 0xc4cdd2, preprobot: 0x4a5560, microscope: 0x585e63, centrifuge: 0xe8ebed, incubator: 0xd6dadd,
     analyzer: 0xdfe3e5, fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3,
-    scale: 0xe8ebed, chromatograph: 0xdfe3e5, darkroom: 0x2a2e33, cleanroom: 0xeef3f4,
+    scale: 0xe8ebed, chromatograph: 0xdfe3e5, sequencer: 0xe4e9ec, serverrack: 0x3a4046, analysisdesk: 0xd8dde1, darkroom: 0x2a2e33, cleanroom: 0xeef3f4,
     flowhood: 0xe8ebed, fumehood: 0xc9ced3
 };
 
@@ -46,16 +49,41 @@ const COFFEE_QUOTES = ["This coffee is terrible.", "Who finished the pot?!", "Is
 const RADIO_QUOTES = ["Who changed the station?!", "Not this song again...", "Who turned it up?!", "Put the jazz back on.", "Way too loud!", "Can we agree on ONE station?"];
 const LAB_QUOTES = ["Where are my goggles?", "Is it Friday yet?", "I mislabeled a tube...", "Who moved my clipboard?", "Five more minutes...", "This centrifuge is cursed.", "Did I turn off the burner?"];
 
+// Rooms (Cleanroom, Dark Room, the ML containment labs) are floor rather than furniture — they
+// render as a tinted patch of tiles ringed by partition walls, in the same style as the break
+// room, instead of as a model standing on the ground. That's not just cosmetic: a model would sit
+// between the cursor and the tile under it, and picking would hand back the room instead of the
+// tile, making it impossible to place anything inside one. `light`/`dark` keep the floor's
+// checkerboard going; `wall`/`trim` dress the partitions.
+const ROOM_STYLE = {
+    dark:    { light: 0x3c434a, dark: 0x31383e, wall: 0x23282d, trim: 0x5b4a78 },
+    sterile: { light: 0xfdfefe, dark: 0xeaf2f5, wall: 0xe8eef1, trim: 0xb8c2c6 },
+    contain: { light: 0xdff0d8, dark: 0xcde4c4, wall: 0xcfe0c4, trim: 0x5f8f4a },
+    break:   { light: 0xe8d3ab, dark: 0xdcc294, wall: 0xc9ced3, trim: 0x97a1aa }
+};
+// Height of the sample tray per machine — the default sits just above a benchtop, but a
+// centrifuge carries its samples down in the rotor well instead.
+const TRAY_Y = { centrifuge: 0.68 };
+// How far each moving part swings when open, in radians. Both ease toward their target in
+// sync(); zero always means shut.
+const HINGE_OPEN = { centrifuge: -Math.PI / 2, cold: -1.15 };   // the lid stops bolt upright, never past it
+const HINGE_SPEED = 6;
+const DIR4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+const DOOR_PREF = [[0, 1], [1, 0], [-1, 0], [0, -1]];   // south first — that's where the floor traffic is
+
 // Height to float each type's progress bar at, clear of its own model.
 const BAR_Y = {
-    bench: 0.85, preprobot: 1.15, microscope: 1.3, centrifuge: 0.95, incubator: 1.45, analyzer: 1.25,
+    bench: 0.85, preprobot: 1.62, microscope: 1.3, centrifuge: 0.95, incubator: 1.45, analyzer: 1.25,
     fridge: 1.5, freezer: 1.65, sink: 0.8, mopcloset: 1.45,
-    scale: 0.75, chromatograph: 1.35, flowhood: 1.35, fumehood: 1.55
+    scale: 0.75, chromatograph: 1.35, sequencer: 1.95, serverrack: 1.6, analysisdesk: 1.15, flowhood: 1.35, fumehood: 1.55
 };
 
 function lmat(c, e = {}) { return new THREE.MeshLambertMaterial({ color: c, ...e }); }
 function box(w, h, d, c, e) { return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), lmat(c, e)); }
-function cyl(rt, rb, h, s, c) { return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, s), lmat(c)); }
+// Takes the same optional material extras as box() — without them every cyl() asking for
+// transparency (the centrifuge's clear lid, the chromatograph's column, the water cooler bottle)
+// silently came out solid, since the argument was just dropped on the floor.
+function cyl(rt, rb, h, s, c, e) { return new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, s), lmat(c, e)); }
 // Every scientist wears a plain white labcoat — with capabilities now independently toggleable
 // (Process/Clean/Mechanic checkboxes) rather than one exclusive role, coloring the coat by
 // whichever capability happened to be checked/unchecked most recently read as arbitrary and kept
@@ -94,7 +122,6 @@ class LabScene {
         this._initScene();
         this._buildStaticWorld();
         this._buildZoneFences();
-        this._buildBreakRoom();
         this._initGhost();
         this._bindEvents();
         this._animate();
@@ -186,21 +213,27 @@ class LabScene {
             for (let tx = 0; tx < GRID; tx++) {
                 const corridor = tz > BUILD_MAX_Z && tx >= gateLo && tx <= gateHi;
                 const zone = corridor ? null : zoneAt(tx, tz);
-                if (!corridor && !zone) continue;
+                // The break room is an annex outside every zone, so its ground gets floor laid for
+                // the biggest it could ever grow to; _updateFloor shows only the part in use.
+                const annex = tx >= BREAK_ROOM_MAX.x0 && tx < BREAK_ROOM_MAX.x0 + BREAK_ROOM_MAX.w &&
+                              tz >= BREAK_ROOM_MAX.z0 && tz < BREAK_ROOM_MAX.z0 + BREAK_ROOM_MAX.h;
+                if (!corridor && !zone && !annex) continue;
                 const light = (tx + tz) % 2 === 0;
-                const inBreakRoom = tx >= BREAK_ROOM.x0 && tx < BREAK_ROOM.x0 + BREAK_ROOM.w &&
-                    tz >= BREAK_ROOM.z0 && tz < BREAK_ROOM.z0 + BREAK_ROOM.h;
-                const col = inBreakRoom ? (light ? 0xe8d3ab : 0xdcc294)               // warm break-room floor
-                    : corridor ? (light ? 0xdfe6d8 : 0xd2d9c9) : (light ? 0xf3efe3 : 0xe3ddcc);
+                const col = corridor ? (light ? 0xdfe6d8 : 0xd2d9c9) : (light ? 0xf3efe3 : 0xe3ddcc);
                 const t = box(0.98, 0.12, 0.98, col);
                 const w = tileToWorld(tx, tz);
                 t.position.set(w.x, -0.06, w.z);
-                t.userData = { kind: 'tile', tx, tz, zoneId: zone ? zone.id : null, light, isBreakRoom: inBreakRoom };
+                // baseCol is what this tile looks like with nothing painted over it — repainting
+                // (unowned land, a room laid on top) starts from here rather than re-deriving the
+                // corridor/break-room/checker rules a second time.
+                t.userData = { kind: 'tile', tx, tz, zoneId: zone ? zone.id : null, light, baseCol: col, annex };
+                if (annex) t.visible = false;
                 fg.add(t);
                 this.floorTiles.push(t);
             }
         }
         this.scene.add(fg);
+        this._floorKeys = new Set(this.floorTiles.map(t => `${t.userData.tx},${t.userData.tz}`));
 
         this._buildWalls();
     }
@@ -224,8 +257,16 @@ class LabScene {
         // just the two literal gate-post columns — otherwise a nav-walkable corridor tile ends up
         // sitting right behind a rendered wall with nothing stopping a worker from walking through it.
         const [gateLo, gateHi] = gateXRange();
+        const inAnnex = (nx, nz) => nx >= BREAK_ROOM_MAX.x0 && nx < BREAK_ROOM_MAX.x0 + BREAK_ROOM_MAX.w &&
+                                    nz >= BREAK_ROOM_MAX.z0 && nz < BREAK_ROOM_MAX.z0 + BREAK_ROOM_MAX.h;
         const isWall = (nx, nz) => {
             if (nx < 0 || nx >= GRID || nz < 0) return true;
+            // The break room is an annex built onto the side of the building, so the shell doesn't
+            // close across where the two meet — its own partition wall (with the doorway in it)
+            // is the boundary there. Without this the shell sealed the annex off completely and
+            // staff appeared to walk through solid wall to get to the coffee, since the shell is
+            // decoration that the nav grid knows nothing about.
+            if (inAnnex(nx, nz)) return false;
             if (nz === BUILD_MAX_Z + 1) return nx < gateLo || nx > gateHi;   // entrance row: open for the gate room's width
             if (nz > BUILD_MAX_Z + 1) return false;
             return !zoneAt(nx, nz);
@@ -294,8 +335,11 @@ class LabScene {
             if (edge) {
                 const horizontal = edge === 'north' || edge === 'south';
                 const len = (horizontal ? xMax - xMin : zMax - zMin) - 0.6;
-                const tx = edge === 'west' ? xMin : edge === 'east' ? xMax : cx;
-                const tz = edge === 'north' ? zMin : edge === 'south' ? zMax : cz;
+                // Pulled in off the boundary line: sitting exactly on it, the tape overlapped the
+                // wall of any room built flush against the edge on the owned side.
+                const IN = 0.35;
+                const tx = edge === 'west' ? xMin + IN : edge === 'east' ? xMax - IN : cx;
+                const tz = edge === 'north' ? zMin + IN : edge === 'south' ? zMax - IN : cz;
                 const tex = this._stripeTexture().clone();
                 tex.needsUpdate = true;
                 tex.repeat.set(len / 0.45, 1);
@@ -309,21 +353,82 @@ class LabScene {
             this.zoneFences.set(zone.id, { group });
         }
     }
-    _updateZones(state) {
-        const key = state.ownedZones.slice().sort().join(',');
-        if (key === this._zonesKey) return;
-        this._zonesKey = key;
+    // Zone ownership and player-built rooms both repaint the same floor tiles, so they share one
+    // pass: work out every tile's colour from scratch whenever either changes, instead of two
+    // painters fighting over who wrote last.
+    _updateFloor(state) {
+        const zonesKey = state.ownedZones.slice().sort().join(',');
+        const roomsKey = state.equipment.filter(e => BUILD[e.type].room)
+            .map(e => `${e.type}@${e.tx},${e.tz}`).sort().join('|') + '#' + breakRoom(state).level;
+        if (zonesKey === this._zonesKey && roomsKey === this._roomsKey) return;
+        this._zonesKey = zonesKey; this._roomsKey = roomsKey;
+
         for (const zone of ZONES) {
-            const owned = state.ownedZones.includes(zone.id);
             const rec = this.zoneFences.get(zone.id);
-            if (rec) rec.group.visible = !owned;
-            for (const t of this.floorTiles) {
-                if (t.userData.zoneId !== zone.id || t.userData.isBreakRoom) continue;
-                const light = t.userData.light;
-                t.material.color.setHex(owned ? (light ? 0xf3efe3 : 0xe3ddcc) : (light ? 0x9fae86 : 0x8fa078));
+            if (rec) rec.group.visible = !state.ownedZones.includes(zone.id);
+        }
+        // roomAreas() is the same description buildNav() walls off, so the partitions drawn here
+        // stand exactly where staff are actually stopped — including the break room, which is just
+        // another walled area as far as this is concerned.
+        const areas = roomAreas(state);
+        const roomKind = new Map();
+        for (const [kind, tiles] of areas) for (const key of tiles) roomKind.set(key, kind);
+        for (const t of this.floorTiles) {
+            const u = t.userData;
+            const style = ROOM_STYLE[roomKind.get(`${u.tx},${u.tz}`)];
+            if (u.annex) t.visible = !!style;        // annex ground only exists once it's walled in
+
+            const unowned = u.zoneId && !state.ownedZones.includes(u.zoneId);
+            const col = style ? (u.light ? style.light : style.dark)
+                : unowned ? (u.light ? 0x9fae86 : 0x8fa078)
+                : u.baseCol;
+            t.material.color.setHex(col);
+        }
+        this._rebuildRoomWalls(state, areas);
+        this._rebuildBreakRoom(state);
+    }
+
+    // Partition walls around the outside of each room, in the same style as the break room's.
+    // Only edges facing something that isn't the same kind of room get a wall, so laying a second
+    // Dark Room flush against the first reads as one larger room rather than two boxes with a
+    // wall between them — that's what makes rooms extendable.
+    _rebuildRoomWalls(state, areas) {
+        if (this.roomWalls) {
+            this.scene.remove(this.roomWalls);
+            this.roomWalls.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+        }
+        this.roomWalls = new THREE.Group();
+        this.scene.add(this.roomWalls);
+        const H = 0.85;
+        for (const [kind, tiles] of areas) {
+            const style = ROOM_STYLE[kind] || ROOM_STYLE.sterile;
+            const doors = roomDoorways(state, tiles);
+            for (const key of tiles) {
+                const [tx, tz] = key.split(',').map(Number);
+                const w = tileToWorld(tx, tz);
+                for (const [dx, dz] of DIR4) {
+                    if (tiles.has(`${tx + dx},${tz + dz}`)) continue;        // shared with the room next door
+                    if (doors.has(`${key}|${dx},${dz}`)) continue;           // left open as the way in
+                    const horizontal = dz !== 0;
+                    const len = 1.04;                                        // overlap slightly so corners meet
+                    const sw = horizontal ? len : 0.16, sd = horizontal ? 0.16 : len;
+                    const g = new THREE.Group();
+                    const body = new THREE.Mesh(new THREE.BoxGeometry(sw, H, sd), lmat(style.wall));
+                    body.position.y = H / 2;
+                    const trim = new THREE.Mesh(new THREE.BoxGeometry(sw + 0.05, 0.1, sd + 0.05), lmat(style.trim));
+                    trim.position.y = H + 0.04;
+                    g.add(body, trim);
+                    // Sat a touch inside its own tile rather than dead on the tile boundary: flush
+                    // against the building's outer wall the two were coincident, and the room's
+                    // colour was lost inside the grey shell.
+                    const INSET = 0.1;
+                    g.position.set(w.x + dx * (0.5 - INSET), 0, w.z + dz * (0.5 - INSET));
+                    this.roomWalls.add(g);
+                }
             }
         }
     }
+
 
     // A dedicated, genuinely walled-off break room (not player-built) — real labs don't allow
     // food or drink on the work floor, so this needed to be its own little room rather than a
@@ -332,8 +437,36 @@ class LabScene {
     // rest of the room's floor stays open for staff to stand around in. Partition walls go up on
     // three sides, with the fourth (east) left open as the doorway. The radio prop only appears
     // once that upgrade is bought.
-    _buildBreakRoom() {
-        const cW = tileToWorld(COFFEE_TILE[0], COFFEE_TILE[1]);
+    // The break room is rebuilt whenever Staff Quarters is upgraded: it starts as a two-tile nook
+    // with just a coffee machine and gains floor and furnishings with each level (see breakRoom()
+    // and breakRoomProps() in grid.js, which the nav grid reads from too). Its partition walls are
+    // drawn by _rebuildRoomWalls like any other walled area.
+    _rebuildBreakRoom(state) {
+        if (this.breakRoomGroup) {
+            this.scene.remove(this.breakRoomGroup);
+            this.breakRoomGroup.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+        }
+        this.breakRoomGroup = new THREE.Group();
+        this.scene.add(this.breakRoomGroup);
+        this.coffeeMachine = null; this.radioProp = null;
+        for (const prop of breakRoomProps(state)) {
+            const w = tileToWorld(prop.tile[0], prop.tile[1]);
+            const g = this[`_prop_${prop.key}`]();
+            g.position.set(w.x, 0, w.z);
+            g.rotation.y = -(prop.rot || 0) * Math.PI / 2;   // same convention as equipment
+            this.breakRoomGroup.add(g);
+            if (prop.key === 'coffee') {
+                this.coffeeMachine = g;
+                // the radio sits on the end of the coffee counter, once that upgrade is bought
+                const r = this._prop_radio();
+                r.position.set(w.x + 0.28, 0.58, w.z - 0.16);
+                r.visible = (state.upgrades.radio || 0) > 0;
+                this.breakRoomGroup.add(r);
+                this.radioProp = r;
+            }
+        }
+    }
+    _prop_coffee() {
         const g = new THREE.Group();
         const counter = box(0.8, 0.55, 0.6, 0x8a6a4a); counter.position.y = 0.275; g.add(counter);
         const top = box(0.84, 0.06, 0.64, 0x6b4a2a); top.position.y = 0.58; g.add(top);
@@ -343,33 +476,26 @@ class LabScene {
         const warmLight = box(0.04, 0.02, 0.04, 0xff6a3c); warmLight.position.set(-0.16, 0.94, -0.06); g.add(warmLight);
         const mug1 = cyl(0.05, 0.05, 0.09, 8, 0xe4dfd2); mug1.position.set(0.16, 0.63, 0.12); g.add(mug1);
         const mug2 = cyl(0.05, 0.05, 0.09, 8, 0xc0564a); mug2.position.set(0.27, 0.63, -0.05); g.add(mug2);
-        g.position.set(cW.x, 0, cW.z);
-        this.scene.add(g);
-        this.coffeeMachine = g;
-
+        return g;
+    }
+    _prop_radio() {
         const r = new THREE.Group();
         const body = box(0.22, 0.14, 0.12, 0xc23b2e); body.position.y = 0.07; r.add(body);
         const speakerL = cyl(0.045, 0.045, 0.02, 10, 0x2a2a2a); speakerL.rotation.x = Math.PI / 2; speakerL.position.set(-0.06, 0.07, 0.061); r.add(speakerL);
         const speakerR = cyl(0.045, 0.045, 0.02, 10, 0x2a2a2a); speakerR.rotation.x = Math.PI / 2; speakerR.position.set(0.06, 0.07, 0.061); r.add(speakerR);
         const antenna = box(0.015, 0.22, 0.015, 0x8a9196); antenna.position.set(0.08, 0.22, 0); antenna.rotation.z = 0.3; r.add(antenna);
-        r.position.set(cW.x + 0.28, 0.58, cW.z - 0.16);
-        r.visible = false;
-        this.scene.add(r);
-        this.radioProp = r;
-
-        // Water cooler
-        const wcW = tileToWorld(WATER_COOLER_TILE[0], WATER_COOLER_TILE[1]);
+        return r;
+    }
+    _prop_cooler() {
         const wc = new THREE.Group();
         const wcStand = box(0.28, 0.48, 0.28, 0xe8ebed); wcStand.position.y = 0.24; wc.add(wcStand);
         const wcBottle = cyl(0.15, 0.17, 0.42, 10, 0x8ecbe8, { transparent: true, opacity: 0.7 });
         wcBottle.position.y = 0.69; wc.add(wcBottle);
         const wcCap = cyl(0.06, 0.06, 0.05, 8, 0x33383c); wcCap.position.y = 0.91; wc.add(wcCap);
         const wcSpout = box(0.05, 0.05, 0.06, 0x33383c); wcSpout.position.set(0.1, 0.44, 0.12); wc.add(wcSpout);
-        wc.position.set(wcW.x, 0, wcW.z);
-        this.scene.add(wc);
-
-        // Vending machine — a few "snack" blocks glimpsed behind the glass front
-        const vW = tileToWorld(VENDING_TILE[0], VENDING_TILE[1]);
+        return wc;
+    }
+    _prop_vending() {
         const vm = new THREE.Group();
         const vmBody = box(0.6, 1.2, 0.42, 0xc23b2e); vmBody.position.y = 0.6; vm.add(vmBody);
         const vmGlass = box(0.44, 0.78, 0.03, 0x1c2b33, { transparent: true, opacity: 0.6 });
@@ -381,12 +507,9 @@ class LabScene {
             vm.add(snack);
         }
         const vmButtons = box(0.1, 0.3, 0.03, 0x2a2f33); vmButtons.position.set(0, 0.36, 0.215); vm.add(vmButtons);
-        vm.position.set(vW.x, 0, vW.z);
-        vm.rotation.y = Math.PI;   // sits against the south wall — front needs to face into the room
-        this.scene.add(vm);
-
-        // Small round table with two stools
-        const tW = tileToWorld(TABLE_TILE[0], TABLE_TILE[1]);
+        return vm;
+    }
+    _prop_table() {
         const tbl = new THREE.Group();
         const tableTop = cyl(0.3, 0.3, 0.05, 12, 0x8a6a4a); tableTop.position.y = 0.5; tbl.add(tableTop);
         const tableLeg = cyl(0.05, 0.05, 0.48, 8, 0x6b4a2a); tableLeg.position.y = 0.26; tbl.add(tableLeg);
@@ -396,31 +519,7 @@ class LabScene {
             const stoolLeg = cyl(0.035, 0.035, 0.3, 8, 0x6b4a2a);
             stoolLeg.position.set(dx, 0.16, dz); tbl.add(stoolLeg);
         }
-        tbl.position.set(tW.x, 0, tW.z);
-        this.scene.add(tbl);
-
-        this._buildBreakRoomWalls();
-    }
-    // Low partition walls (shorter than the main building's) on three sides of the break room,
-    // leaving the east side open as its doorway onto the main floor.
-    _buildBreakRoomWalls() {
-        const w0 = tileToWorld(BREAK_ROOM.x0, BREAK_ROOM.z0);
-        const w1 = tileToWorld(BREAK_ROOM.x0 + BREAK_ROOM.w - 1, BREAK_ROOM.z0 + BREAK_ROOM.h - 1);
-        const xMin = w0.x - 0.5, xMax = w1.x + 0.5, zMin = w0.z - 0.5, zMax = w1.z + 0.5;
-        const cx = (xMin + xMax) / 2, cz = (zMin + zMax) / 2;
-        const wallMat = lmat(0xc9ced3), trimMat = lmat(0x97a1aa);
-        const H = 0.85;
-        const seg = (len, x, z, horizontal) => {
-            const w = horizontal ? len : 0.16, d = horizontal ? 0.16 : len;
-            const g = new THREE.Group();
-            const b = new THREE.Mesh(new THREE.BoxGeometry(w, H, d), wallMat); b.position.y = H / 2;
-            const tr = new THREE.Mesh(new THREE.BoxGeometry(w + 0.05, 0.1, d + 0.05), trimMat); tr.position.y = H + 0.04;
-            g.add(b, tr); g.position.set(x, 0, z); this.scene.add(g);
-        };
-        seg(xMax - xMin, cx, zMin, true);    // north
-        seg(xMax - xMin, cx, zMax, true);    // south
-        seg(zMax - zMin, xMin, cz, false);   // west
-        // east intentionally open — the doorway into the main floor
+        return tbl;
     }
 
     _initGhost() {
@@ -585,23 +684,20 @@ class LabScene {
         g.userData = { kind: 'equip', id: e.id, type: e.type, rot: e.rot };
         const col = EQUIP_COLOR[e.type] || 0xcccccc;
         const [fw, fh] = BUILD[e.type].foot;                 // model built in base orientation
-        const tray = new THREE.Group(); tray.position.y = 0.62; g.userData.tray = tray; g.add(tray);
+        // Where the loaded samples sit on this machine. Most hold them on a flat tray; the
+        // centrifuge holds them in its rotor, higher up and — since that's the whole point of a
+        // centrifuge — spinning along with it whenever a run is actually under way.
+        const tray = new THREE.Group(); tray.position.y = TRAY_Y[e.type] ?? 0.62;
+        if (e.type === 'centrifuge') { tray.userData.spinAnim = true; tray.userData.spinRate = 16; }
+        g.userData.tray = tray; g.add(tray);
 
-        // Progress bar, floating above the machine while it's actively running a timed step
-        // (hidden otherwise, and not shown at all for cold-storage "slots" — see sync()).
-        const BAR_W = 0.56;
-        const barBg = box(BAR_W + 0.06, 0.09, 0.03, 0x2a2f33);
-        const fgGeo = new THREE.BoxGeometry(BAR_W, 0.055, 0.035);
-        fgGeo.translate(BAR_W / 2, 0, 0);                    // pivot at the left edge so it fills left-to-right
-        const barFg = new THREE.Mesh(fgGeo, lmat(0x54d67a));
-        barFg.position.set(-BAR_W / 2, 0, 0.005);
-        const barGroup = new THREE.Group();
-        barGroup.add(barBg, barFg);
-        barGroup.position.set(0, BAR_Y[e.type] || 1.4, 0);
-        barGroup.visible = false;
-        g.add(barGroup);
-        g.userData.progressFg = barFg;
-        g.userData.progressGroup = barGroup;
+        // The progress bar isn't modelled here at all — it's a DOM element positioned in
+        // _syncProgressBars(), for the same reason the speech bubbles are: the 3D pass renders at
+        // a fraction of screen resolution for the pixel-art look, which left a thin bar chunky and
+        // hard to read. A flat panel in the scene also had to face *somewhere*, so it went nearly
+        // edge-on at two of the four camera angles; an overlay always faces you. This just records
+        // the height to anchor it at.
+        g.userData.barY = BAR_Y[e.type] || 1.4;
 
         // Reliability light — hidden while a machine's in good shape, amber once it's worn
         // enough to risk breaking, blinking red once it actually has (see sync() below). Sits
@@ -619,6 +715,21 @@ class LabScene {
                 const l = box(0.08, 0.46, 0.08, 0x6b7075); l.position.set(x, 0.25, z); g.add(l);
             }
             const shelf = box(0.7, 0.1, 0.16, 0xdedede); shelf.position.set(0, 0.72, -0.32); g.add(shelf);
+            // Bunsen burner, lit only while the bench is actually running a prep (see sync()).
+            // The flame's geometry is shifted so it sits on the barrel — scaling it then makes it
+            // lick upward from the burner rather than growing out of both ends.
+            const burnerBase = cyl(0.075, 0.095, 0.045, 8, 0x6b7075); burnerBase.position.set(0.27, 0.62, 0.22); g.add(burnerBase);
+            const burnerTube = cyl(0.028, 0.032, 0.17, 8, 0x8a9196); burnerTube.position.set(0.27, 0.73, 0.22); g.add(burnerTube);
+            const flameGeo = new THREE.CylinderGeometry(0.016, 0.05, 0.14, 8);
+            flameGeo.translate(0, 0.07, 0);
+            const flame = new THREE.Mesh(flameGeo, lmat(0x5b8de8, { transparent: true, opacity: 0.8 }));
+            flame.position.set(0.27, 0.81, 0.22); flame.visible = false;
+            flame.userData.flame = true; g.add(flame);
+            const coreGeo = new THREE.CylinderGeometry(0.008, 0.026, 0.075, 8);
+            coreGeo.translate(0, 0.037, 0);
+            const flameCore = new THREE.Mesh(coreGeo, lmat(0xf5d76e, { transparent: true, opacity: 0.9 }));
+            flameCore.position.set(0.27, 0.81, 0.22); flameCore.visible = false;
+            flameCore.userData.flame = true; g.add(flameCore);
         } else if (e.type === 'preprobot') {
             // A benchtop liquid-handling deck spanning its full 2×1 footprint — classic Tecan-style
             // rig: a bench with a small well grid, an XY gantry (two side rails + a crossing
@@ -649,6 +760,23 @@ class LabScene {
             const head = box(0.09, 0.16, 0.06, 0x8a9196); head.position.set(0, -0.14, 0); carriage.add(head);
             const tip = box(0.05, 0.03, 0.03, 0x37ff8a, { transparent: true, opacity: 0.9 });
             tip.position.set(0, -0.23, 0); tip.userData.spin = true; carriage.add(tip);
+            // Sealed, extracted glass enclosure over the whole deck. Nothing reaches in — it's
+            // automated — so unlike the hoods there's no access gap, and being contained is what
+            // lets it run hazardous Chem Prep as well as routine prep (see BUILD.preprobot).
+            const GH = 0.78, deckY = 0.58;
+            const gy = deckY + GH / 2, gx = fw / 2 - 0.07, gz = fh / 2 - 0.07;
+            const glass = { transparent: true, opacity: 0.22, depthWrite: false };
+            const pane = (w, hgt, d, x, y, z) => { const m = box(w, hgt, d, 0xcfe8f2, glass); m.position.set(x, y, z); g.add(m); };
+            pane(fw - 0.14, GH, 0.03, 0, gy, -gz);
+            pane(fw - 0.14, GH, 0.03, 0, gy, gz);
+            pane(0.03, GH, fh - 0.14, -gx, gy, 0);
+            pane(0.03, GH, fh - 0.14, gx, gy, 0);
+            pane(fw - 0.14, 0.03, fh - 0.14, 0, deckY + GH, 0);
+            for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+                const post = box(0.05, GH, 0.05, 0x8a9196); post.position.set(sx * gx, gy, sz * gz); g.add(post);
+            }
+            const exDuct = cyl(0.1, 0.1, 0.28, 10, 0x8a9196); exDuct.position.set(fw * 0.28, deckY + GH + 0.14, 0); g.add(exDuct);
+            const exCap = cyl(0.13, 0.13, 0.04, 10, 0x6b7075); exCap.position.set(fw * 0.28, deckY + GH + 0.3, 0); g.add(exCap);
         } else if (e.type === 'microscope') {
             // Used to float knee-high on a squat pedestal — now sits properly on a bench, like
             // the actual Lab Bench model, with the scope mounted on top.
@@ -661,27 +789,134 @@ class LabScene {
             const stage = box(0.2, 0.03, 0.16, 0x9aa2a8); stage.position.set(0, 0.72, -0.02); g.add(stage);
             const tube = cyl(0.055, 0.055, 0.3, 8, 0x2f3438); tube.position.set(0, 0.95, 0.08); tube.rotation.x = 0.55; g.add(tube);
         } else if (e.type === 'centrifuge') {
-            const body = cyl(0.4, 0.44, 0.5, 12, col); body.position.y = 0.38; g.add(body);
-            const lid = cyl(0.32, 0.4, 0.14, 12, 0x33383c); lid.position.y = 0.66; g.add(lid);
-            // A rotationally-symmetric cylinder spinning wouldn't actually look like it's moving —
-            // this bar (and the two tube stubs on it) gives the spin something visibly asymmetric
-            // to show, only rotating while a slot is actually running.
-            const rotor = new THREE.Group(); rotor.position.y = 0.735; rotor.userData.spinAnim = true; g.add(rotor);
-            const bar = box(0.3, 0.025, 0.055, 0x8a9196); rotor.add(bar);
-            const stub1 = cyl(0.035, 0.035, 0.05, 8, 0xe8ebed); stub1.position.set(0.13, 0.03, 0); rotor.add(stub1);
-            const stub2 = cyl(0.035, 0.035, 0.05, 8, 0xe8ebed); stub2.position.set(-0.13, 0.03, 0); rotor.add(stub2);
-            const lt = box(0.08, 0.08, 0.08, 0x37ff8a); lt.position.set(0.28, 0.52, 0.3); lt.userData.spin = true; g.add(lt);
+            // The tubes in the rotor well are the real staged/running samples (_syncTray lays this
+            // type out radially) and they whirl round with the rotor spider on a run. The lid is
+            // clear polycarbonate and hinged at the back: it drops shut while the rotor is up to
+            // speed — you can't spin one open — and stands open again the moment the run ends, so
+            // you can still watch the samples through it either way.
+            const drum = cyl(0.43, 0.46, 0.5, 14, col); drum.position.y = 0.25; g.add(drum);
+            const rim = cyl(0.47, 0.45, 0.07, 14, 0xb8c2c6); rim.position.y = 0.53; g.add(rim);
+            const well = cyl(0.38, 0.36, 0.2, 14, 0x23282d); well.position.y = 0.5; g.add(well);
+            const rotor = new THREE.Group(); rotor.position.y = 0.62;
+            rotor.userData.spinAnim = true; rotor.userData.spinRate = 16; g.add(rotor);
+            const hub = cyl(0.08, 0.1, 0.1, 8, 0x8a9196); rotor.add(hub);
+            for (const rot of [0, Math.PI / 2]) {           // two crossed bars = a four-arm spider
+                const arm = box(0.6, 0.025, 0.06, 0x9aa2a8); arm.rotation.y = rot; rotor.add(arm);
+            }
+            // A clear collar closes the drum in around the rotor, and the lid is a flat disc
+            // hinged at the back that swings to exactly vertical — no further. Stopping at 90°
+            // is what keeps it inside the machine's own tile: standing straight up, only the
+            // disc's 5cm thickness sits behind the hinge, where tipping it past vertical would
+            // swing its whole radius out over the tile behind (and into the wall).
+            const collar = cyl(0.40, 0.40, 0.27, 14, 0xdff2fa, { transparent: true, opacity: 0.16, depthWrite: false });
+            collar.position.y = 0.70; g.add(collar);
+            const barrel = cyl(0.04, 0.04, 0.3, 8, 0x6b7075);
+            barrel.rotation.z = Math.PI / 2; barrel.position.set(0, 0.86, -0.34); g.add(barrel);
+            const lidHinge = new THREE.Group();
+            lidHinge.position.set(0, 0.86, -0.34);
+            lidHinge.rotation.x = HINGE_OPEN.centrifuge;
+            lidHinge.userData.hingeAxis = 'x';
+            lidHinge.userData.hingeOpen = HINGE_OPEN.centrifuge;
+            lidHinge.userData.hingeTarget = HINGE_OPEN.centrifuge;
+            lidHinge.userData.hingeInterlock = true;      // stays down until the rotor has stopped
+            g.add(lidHinge); g.userData.hinge = lidHinge;
+            for (const sx of [-1, 1]) {
+                const strap = box(0.06, 0.05, 0.14, 0x8a9196);
+                strap.position.set(sx * 0.13, 0, 0.07); lidHinge.add(strap);
+            }
+            const lid = cyl(0.41, 0.41, 0.05, 14, 0xdff2fa, { transparent: true, opacity: 0.25, depthWrite: false });
+            lid.position.set(0, 0, 0.34); lidHinge.add(lid);
+            const lidRim = cyl(0.42, 0.42, 0.02, 14, 0xb8c2c6); lidRim.position.set(0, -0.035, 0.34); lidHinge.add(lidRim);
+            const knob = box(0.14, 0.05, 0.06, 0x6b7075); knob.position.set(0, 0.04, 0.62); lidHinge.add(knob);
+            const panel = box(0.24, 0.12, 0.04, 0x1b2b33); panel.position.set(0, 0.3, 0.45); g.add(panel);
+            const lt = box(0.08, 0.05, 0.02, 0x37ff8a, { transparent: true, opacity: 0.9 });
+            lt.position.set(0, 0.3, 0.48); lt.userData.spin = true; g.add(lt);
         } else if (e.type === 'incubator') {
-            // Door and window used to sit almost exactly coplanar with the body's front face and
-            // with each other, which z-fights (flickers) at most camera angles — each layer now
-            // gets a clear, deliberate gap so nothing shares a depth.
-            const bodyFace = fh / 2 - 0.075;                 // body spans to fh/2; stop comfortably short
-            const body = box(fw - 0.15, 1.2, fh - 0.15, col); body.position.y = 0.66; g.add(body);
-            const door = box(fw - 0.3, 0.85, 0.05, 0xeef1f2); door.position.set(0, 0.6, bodyFace); g.add(door);
+            // Same idea as the cold stores: the cabinet stops short of the door so there's a warm,
+            // shelved recess to see when it swings open, and the door is hinged rather than painted
+            // on. Layers are kept at deliberately different depths — they used to be near-coplanar
+            // and z-fought at most camera angles.
+            const bodyFace = fh / 2 - 0.075;
+            const RECESS = 0.2, back = -(fh / 2 - 0.075), front = bodyFace - RECESS;
+            const body = box(fw - 0.15, 1.2, front - back, col);
+            body.position.set(0, 0.66, (front + back) / 2); g.add(body);
+            // Kept within the footprint of the shut door, same as the cold stores — and framed the
+            // same way, so nothing shows through around the door when it's closed.
+            const dwI = fw - 0.3, inWI = dwI - 0.08, doorHI = 0.85;
+            const inTopI = 0.6 + 0.425 - 0.05, inBotI = 0.6 - 0.425 + 0.05;
+            const zMidI = (front + bodyFace) / 2, frameWI = (fw - 0.15 - dwI) / 2;
+            const lintelHI = 1.26 - (0.6 + doorHI / 2);
+            if (lintelHI > 0.01) { const m = box(fw - 0.15, lintelHI, RECESS, col); m.position.set(0, 1.26 - lintelHI / 2, zMidI); g.add(m); }
+            const sillHI = 0.6 - doorHI / 2;
+            if (sillHI > 0.01) { const m = box(fw - 0.15, sillHI, RECESS, col); m.position.set(0, sillHI / 2, zMidI); g.add(m); }
+            if (frameWI > 0.01) for (const sx of [-1, 1]) {
+                const m = box(frameWI, doorHI, RECESS, col);
+                m.position.set(sx * (dwI + frameWI) / 2, 0.6, zMidI); g.add(m);
+            }
+            const inner = box(inWI, inTopI - inBotI, 0.03, 0x7a6a52); inner.position.set(0, (inTopI + inBotI) / 2, front + 0.02); g.add(inner);
+            const warm = box(inWI - 0.05, inTopI - inBotI - 0.05, 0.02, 0xf0a03c, { transparent: true, opacity: 0.35 });
+            warm.position.set(0, (inTopI + inBotI) / 2, front + 0.05); g.add(warm);
+            for (let i = 0; i < 3; i++) {
+                const y = inBotI + 0.07 + i * (inTopI - inBotI - 0.18) / 2;
+                const shelf = box(inWI - 0.04, 0.03, RECESS - 0.06, 0x9aa2a8);
+                shelf.position.set(0, y, front + RECESS / 2); g.add(shelf);
+                for (let k = 0; k < 2; k++) {
+                    const dish = cyl(0.07, 0.07, 0.035, 10, [0x9fd36a, 0xd9c98a][(i + k) % 2]);
+                    dish.position.set(-0.13 + k * 0.26, y + 0.035, front + RECESS / 2); g.add(dish);
+                }
+            }
+            const dw = fw - 0.3;
+            const hinge = new THREE.Group();
+            hinge.position.set(-dw / 2, 0.6, bodyFace);
+            hinge.userData.hingeAxis = 'y';
+            hinge.userData.hingeOpen = HINGE_OPEN.cold;
+            hinge.userData.hingeTarget = 0;
+            g.add(hinge); g.userData.hinge = hinge;
+            const door = box(dw, 0.85, 0.05, 0xeef1f2); door.position.set(dw / 2, 0, 0); hinge.add(door);
             const win = box(0.36, 0.34, 0.03, 0x8be0c0, { transparent: true, opacity: 0.8 });
-            win.position.set(0, 0.78, bodyFace + 0.07); g.add(win);
+            win.position.set(dw / 2, 0.18, 0.04); hinge.add(win);
             const handle = box(0.05, 0.34, 0.05, 0x6b7075);
-            handle.position.set(fw / 2 - 0.3, 0.5, bodyFace + 0.03); g.add(handle);
+            handle.position.set(dw - 0.06, -0.1, 0.04); hinge.add(handle);
+        } else if (e.type === 'sequencer') {
+            // A big benchtop instrument: heavy chassis, a lit flow-cell bay on the front face, and
+            // a monitor on a stalk showing the read as it comes off — both lights only on while
+            // it's actually running (userData.spin), like every other machine's activity tell.
+            const cabFace = (fh - 0.2) / 2;
+            const body = box(fw - 0.2, 1.0, fh - 0.2, col); body.position.y = 0.52; g.add(body);
+            const plinth = box(fw - 0.1, 0.08, fh - 0.1, 0x9aa2a8); plinth.position.y = 0.04; g.add(plinth);
+            const bay = box(fw * 0.42, 0.28, 0.05, 0x11333a); bay.position.set(-fw * 0.17, 0.6, cabFace + 0.03); g.add(bay);
+            const bayGlow = box(fw * 0.36, 0.2, 0.02, 0x54d67a, { transparent: true, opacity: 0.85 });
+            bayGlow.position.set(-fw * 0.17, 0.6, cabFace + 0.07); bayGlow.userData.spin = true; g.add(bayGlow);
+            const handle = box(fw * 0.3, 0.05, 0.06, 0x6b7075); handle.position.set(-fw * 0.17, 0.42, cabFace + 0.04); g.add(handle);
+            const vent = box(fw - 0.45, 0.07, 0.12, 0x9aa2a8); vent.position.set(0, 1.0, -cabFace + 0.06); g.add(vent);
+            const post = box(0.07, 0.34, 0.07, 0x6b7075); post.position.set(fw * 0.2, 1.19, 0); g.add(post);
+            const screen = box(0.52, 0.36, 0.05, 0x1b2b33); screen.position.set(fw * 0.2, 1.52, 0.05); g.add(screen);
+            const trace = box(0.42, 0.24, 0.02, 0x35d0ff, { transparent: true, opacity: 0.85 });
+            trace.position.set(fw * 0.2, 1.52, 0.09); trace.userData.spin = true; g.add(trace);
+        } else if (e.type === 'serverrack') {
+            // A single cabinet of blades. The LED columns are the only activity tell it needs —
+            // nothing moves in or out by hand, samples arrive over the network (autoFeed).
+            const cab = box(0.62, 1.25, 0.72, col); cab.position.y = 0.63; g.add(cab);
+            const foot = box(0.68, 0.06, 0.78, 0x23282d); foot.position.y = 0.03; g.add(foot);
+            for (let i = 0; i < 4; i++) {
+                const shelf = box(0.54, 0.035, 0.03, 0x6b7075);
+                shelf.position.set(0, 0.26 + i * 0.27, 0.365); g.add(shelf);
+                const led = box(0.3, 0.045, 0.02, 0x37ff8a, { transparent: true, opacity: 0.9 });
+                led.position.set(-0.1, 0.34 + i * 0.27, 0.37); led.userData.spin = true; g.add(led);
+            }
+            const grille = box(0.5, 0.5, 0.02, 0x23282d); grille.position.set(0, 1.05, 0.365); g.add(grille);
+        } else if (e.type === 'analysisdesk') {
+            const top = box(0.92, 0.08, 0.62, col); top.position.y = 0.5; g.add(top);
+            for (const [x, z] of [[.38, .24], [-.38, .24], [.38, -.24], [-.38, -.24]]) {
+                const l = box(0.06, 0.46, 0.06, 0x8a9196); l.position.set(x, 0.23, z); g.add(l);
+            }
+            const stand = box(0.08, 0.12, 0.08, 0x6b7075); stand.position.set(-0.08, 0.6, -0.18); g.add(stand);
+            const monitor = box(0.46, 0.32, 0.05, 0x1b2b33); monitor.position.set(-0.08, 0.81, -0.18); g.add(monitor);
+            const screen = box(0.38, 0.24, 0.02, 0x35d0ff, { transparent: true, opacity: 0.85 });
+            screen.position.set(-0.08, 0.81, -0.14); screen.userData.spin = true; g.add(screen);
+            const keys = box(0.34, 0.03, 0.14, 0xdfe3e5); keys.position.set(-0.08, 0.55, 0.06); g.add(keys);
+            const paper = box(0.18, 0.012, 0.22, 0xf4ede0); paper.position.set(0.3, 0.55, 0.02); g.add(paper);
+            const mug = cyl(0.05, 0.05, 0.1, 8, 0xd88a5a); mug.position.set(0.34, 0.59, -0.2); g.add(mug);
         } else if (e.type === 'analyzer') {
             // cabFace used to be computed from fh/2 (half the whole footprint) instead of the
             // cabinet box's own half-depth (fh-0.2)/2 — it landed the screen and its status glow
@@ -692,13 +927,57 @@ class LabScene {
             const glow = box(fw * 0.42, 0.3, 0.02, 0x35d0ff, { transparent: true, opacity: 0.85 });
             glow.position.set(0, 0.7, cabFace + 0.11); glow.userData.spin = true; g.add(glow);
         } else if (e.type === 'fridge' || e.type === 'freezer') {
-            const body = box(fw - 0.2, 1.3 + (fh - 1) * 0.15, fh - 0.2, col);
-            body.position.y = body.geometry.parameters.height / 2; g.add(body);
-            const door = box(fw - 0.34, body.geometry.parameters.height - 0.4, 0.06, 0xffffff);
-            door.position.set(0, body.position.y, fh / 2 - 0.14); g.add(door);
-            const h2 = box(0.06, 0.34, 0.06, 0x8a9196); h2.position.set(fw / 2 - 0.24, body.position.y, fh / 2 - 0.1); g.add(h2);
+            // The cabinet stops short of the door, leaving a shallow recess with lit shelves and
+            // vials in it. A solid block would have shown a blank wall behind the open door —
+            // there has to be somewhere for the door to reveal.
+            const bodyH = 1.3 + (fh - 1) * 0.15;
+            const zDoor = fh / 2 - 0.14, RECESS = 0.18;
+            const back = -(fh / 2 - 0.1), front = zDoor - RECESS;
+            const body = box(fw - 0.2, bodyH, front - back, col);
+            body.position.set(0, bodyH / 2, (front + back) / 2); g.add(body);
+            // Everything in the recess is kept inside the area the shut door covers, or you'd see
+            // shelves poking out around its edges with the fridge closed.
+            const dwF = fw - 0.34, doorH = bodyH - 0.4;
+            const inW = dwF - 0.08, inTop = bodyH / 2 + doorH / 2 - 0.05, inBot = bodyH / 2 - doorH / 2 + 0.05;
+            const inner = box(inW, inTop - inBot, 0.03, e.type === 'freezer' ? 0xbfe0ef : 0xe8f1f5);
+            inner.position.set(0, (inTop + inBot) / 2, front + 0.02); g.add(inner);
+            const chill = box(inW - 0.05, inTop - inBot - 0.05, 0.02, e.type === 'freezer' ? 0x8fd3f0 : 0xcfe8f2, { transparent: true, opacity: 0.45 });
+            chill.position.set(0, (inTop + inBot) / 2, front + 0.05); g.add(chill);
+            // Frame around the opening. The recess is a full-width gap in the front of the
+            // cabinet, so with the door shut you could still see into it over the door's top edge
+            // from this camera angle — these panels close everything except the doorway itself.
+            const frameW = (fw - 0.2 - dwF) / 2, zMid = (front + zDoor) / 2;
+            const lintelH = bodyH - (bodyH / 2 + doorH / 2);
+            if (lintelH > 0.01) { const m = box(fw - 0.2, lintelH, RECESS, col); m.position.set(0, bodyH - lintelH / 2, zMid); g.add(m); }
+            const sillH = bodyH / 2 - doorH / 2;
+            if (sillH > 0.01) { const m = box(fw - 0.2, sillH, RECESS, col); m.position.set(0, sillH / 2, zMid); g.add(m); }
+            if (frameW > 0.01) for (const sx of [-1, 1]) {
+                const m = box(frameW, doorH, RECESS, col);
+                m.position.set(sx * (dwF + frameW) / 2, bodyH / 2, zMid); g.add(m);
+            }
+            const VIAL = [0xe0555f, 0x77c97b, 0x5b8de8, 0xf1d34a];
+            for (let i = 0; i < 3; i++) {
+                const y = inBot + 0.08 + i * (inTop - inBot - 0.2) / 2;
+                const shelf = box(inW - 0.04, 0.03, RECESS - 0.06, 0x9aa2a8);
+                shelf.position.set(0, y, front + RECESS / 2); g.add(shelf);
+                for (let k = 0; k < 3; k++) {
+                    const vial = box(0.06, 0.12, 0.06, VIAL[(i * 3 + k) % VIAL.length]);
+                    vial.position.set(-(inW - 0.16) / 2 + k * (inW - 0.16) / 2, y + 0.075, front + RECESS / 2); g.add(vial);
+                }
+            }
+            // The door hangs off a hinge post down its left edge so it swings out of the way while
+            // a scientist is actually shelving something, instead of being a painted-on panel.
+            const dw = fw - 0.34;
+            const hinge = new THREE.Group();
+            hinge.position.set(-dw / 2, body.position.y, fh / 2 - 0.14);
+            hinge.userData.hingeAxis = 'y';
+            hinge.userData.hingeOpen = HINGE_OPEN.cold;
+            hinge.userData.hingeTarget = 0;                  // starts shut
+            g.add(hinge); g.userData.hinge = hinge;
+            const door = box(dw, bodyH - 0.4, 0.06, 0xffffff); door.position.set(dw / 2, 0, 0); hinge.add(door);
+            const h2 = box(0.06, 0.34, 0.06, 0x8a9196); h2.position.set(dw - 0.07, 0, 0.04); hinge.add(h2);
             const fr = box(0.5, 0.12, 0.05, e.type === 'freezer' ? 0x2fa8d8 : 0x9fd6e6);
-            fr.position.set(0, body.geometry.parameters.height - 0.2, fh / 2 - 0.14); g.add(fr);
+            fr.position.set(dw / 2, bodyH - 0.2 - body.position.y, 0); hinge.add(fr);
         } else if (e.type === 'mopcloset') {
             // Broom and bucket used to sit far enough forward (and the tilted broom's swing far
             // enough) that both poked out through the closet's own front face instead of reading
@@ -755,8 +1034,13 @@ class LabScene {
             }
             if (isFume) {
                 const stripe = box(0.87, 0.05, 0.03, 0xf0c040); stripe.position.set(0, counterTop - 0.03, 0.435); g.add(stripe);
-                const duct = cyl(0.13, 0.13, 0.45, 10, 0x8a9196); duct.position.y = 1.26; g.add(duct);
-                const cap = cyl(0.16, 0.16, 0.05, 10, 0x6b7075); cap.position.y = 1.5; g.add(cap);
+                // Capped off on top, same as the Flow Hood — an extraction cabinet open to the
+                // room above the sash wouldn't contain anything. The duct rises out of the lid.
+                const lid = box(0.8, 0.12, 0.8, 0xb8c2c6); lid.position.y = hoodY + 0.06; g.add(lid);
+                const glassTop = box(0.66, 0.02, 0.66, glassCol, { transparent: true, opacity: glassOp });
+                glassTop.position.y = hoodY - 0.01; g.add(glassTop);
+                const duct = cyl(0.13, 0.13, 0.45, 10, 0x8a9196); duct.position.y = 1.32; g.add(duct);
+                const cap = cyl(0.16, 0.16, 0.05, 10, 0x6b7075); cap.position.y = 1.56; g.add(cap);
             } else {
                 const hood = box(0.8, 0.2, 0.8, 0xe8ebed); hood.position.y = 1.08; g.add(hood);
                 const filterGlow = box(0.6, 0.03, 0.6, 0x8be0c0, { transparent: true, opacity: 0.8 });
@@ -773,44 +1057,6 @@ class LabScene {
             const scr = box(fw * 0.36, 0.3, 0.05, 0x11333a); scr.position.set(-fw * 0.15, 0.75, cabFace + 0.03); g.add(scr);
             const trace = box(fw * 0.3, 0.2, 0.02, 0x37ff8a, { transparent: true, opacity: 0.85 });
             trace.position.set(-fw * 0.15, 0.75, cabFace + 0.08); trace.userData.spin = true; g.add(trace);
-        } else if (e.type === 'darkroom') {
-            // A 4×4 room, not a machine — it doesn't process anything itself (see equipCaps() in
-            // core.js): any Microscope standing on one of its tiles picks up fluorescence imaging.
-            // Same room-with-open-corner shape as the Cleanroom below, but light-sealed (opaque
-            // near-black walls instead of glass) with a UV accent instead of a filter vent. Placing
-            // another Dark Room flush against this one just tiles a second one right next to it —
-            // no special joining needed, each covers its own floor independently.
-            const floor = box(fw - 0.1, 0.04, fh - 0.1, 0x1c1f22); floor.position.y = 0.02; g.add(floor);
-            const px = (fw - 0.2) / 2, pz = (fh - 0.2) / 2;
-            for (const [x, z] of [[-px, -pz], [px, -pz], [-px, pz]]) {
-                const post = box(0.08, 1.1, 0.08, 0x2a2e33); post.position.set(x, 0.55, z); g.add(post);
-            }
-            const wallW = box(0.06, 1.0, fh - 0.15, 0x14161a); wallW.position.set(-px - 0.02, 0.5, 0); g.add(wallW);
-            const wallN = box(fw - 0.15, 1.0, 0.06, 0x14161a); wallN.position.set(0, 0.5, -pz - 0.02); g.add(wallN);
-            // a mid-wall support post on each solid side — a 4-tile wall reads as too thin/sparse
-            // with only the corner posts holding it up
-            const wallMidW = box(0.08, 1.1, 0.08, 0x2a2e33); wallMidW.position.set(-px, 0.55, 0); g.add(wallMidW);
-            const wallMidN = box(0.08, 1.1, 0.08, 0x2a2e33); wallMidN.position.set(0, 0.55, -pz); g.add(wallMidN);
-            // open corner (SE, no post/wall) reads as the doorway a scientist wheels a microscope through
-            const glow = box(0.16, 0.16, 0.04, 0x9d6cff, { transparent: true, opacity: 0.9 });
-            glow.position.set(px, 0.95, pz); glow.userData.spin = true; g.add(glow);
-        } else if (e.type === 'cleanroom') {
-            // A 4×4 room — see the Dark Room comment above, same non-blocking/independently-
-            // tiling design, just glass-walled and sterile-white instead of light-sealed.
-            const floor = box(fw - 0.1, 0.04, fh - 0.1, 0xf4f7f8); floor.position.y = 0.02; g.add(floor);
-            const px = (fw - 0.2) / 2, pz = (fh - 0.2) / 2;
-            for (const [x, z] of [[-px, -pz], [px, -pz], [-px, pz], [px, pz]]) {
-                const post = box(0.06, 1.1, 0.06, 0xb8c2c6); post.position.set(x, 0.55, z); g.add(post);
-            }
-            const wallGlassN = box(fw - 0.15, 0.9, 0.03, 0xcfe8f2, { transparent: true, opacity: 0.35 });
-            wallGlassN.position.set(0, 0.5, -pz); g.add(wallGlassN);
-            const wallGlassS = box(fw - 0.15, 0.9, 0.03, 0xcfe8f2, { transparent: true, opacity: 0.35 });
-            wallGlassS.position.set(0, 0.5, pz); g.add(wallGlassS);
-            const wallMidN = box(0.06, 1.1, 0.06, 0xb8c2c6); wallMidN.position.set(0, 0.55, -pz); g.add(wallMidN);
-            const wallMidS = box(0.06, 1.1, 0.06, 0xb8c2c6); wallMidS.position.set(0, 0.55, pz); g.add(wallMidS);
-            const vent = box(0.4, 0.06, 0.4, 0xdfe3e5); vent.position.set(0, 1.05, 0); g.add(vent);
-            const ventGlow = box(0.3, 0.02, 0.3, 0x8be0c0, { transparent: true, opacity: 0.8 });
-            ventGlow.position.set(0, 1.09, 0); g.add(ventGlow);
         }
 
         if (e.id != null) this._applyEquipTransform(g, e);
@@ -822,6 +1068,7 @@ class LabScene {
         g.position.set(c.x, 0, c.z);
         g.rotation.y = -e.rot * Math.PI / 2;
         g.userData.rot = e.rot;
+        g.userData.tx = e.tx; g.userData.tz = e.tz;
     }
     _syncTray(g, e) {
         const tray = g.userData.tray;
@@ -842,11 +1089,27 @@ class LabScene {
         if (tray.userData.sig === sig) return;   // nothing about the contents actually changed
         tray.userData.sig = sig;
         while (tray.children.length) tray.remove(tray.children[0]);
+        // A centrifuge loads its tubes around a rotor, not in rows: space them evenly around the
+        // circle (always over at least 4 positions, so a half-empty rotor still reads as balanced)
+        // and lean each one outwards the way a fixed-angle rotor holds them. The holder carries
+        // the position and facing, the cell inside it carries the lean, so the two can't fight
+        // over Euler order.
+        const radial = e.type === 'centrifuge';
         items.forEach((it, i) => {
             const cell = new THREE.Group();
-            cell.position.set(-0.24 + (i % 3) * 0.24, 0, -0.1 + Math.floor(i / 3) * 0.24);
+            if (radial) {
+                const a = (i / Math.max(items.length, 4)) * Math.PI * 2;
+                const holder = new THREE.Group();
+                holder.position.set(Math.cos(a) * 0.2, 0, Math.sin(a) * 0.2);
+                holder.rotation.y = -a;              // local +X now points outward
+                cell.rotation.z = -0.3;              // tip the tube out over the rotor's edge
+                holder.add(cell);
+                tray.add(holder);
+            } else {
+                cell.position.set(-0.24 + (i % 3) * 0.24, 0, -0.1 + Math.floor(i / 3) * 0.24);
+                tray.add(cell);
+            }
             this._fillTrayItem(cell, it);
-            tray.add(cell);
         });
     }
     _fillTrayItem(cell, it) {
@@ -953,24 +1216,55 @@ class LabScene {
         // the catch-up rate by speed too keeps the render's lag roughly constant at any speed.
         const a = 1 - Math.exp(-LERP_K * Math.min(dt, 0.1) * (state.speed || 1));
 
-        this._updateZones(state);
+        this._updateFloor(state);
 
-        this._reconcile(this.equipMeshes, state.equipment, e => this._buildEquip(e), (mesh, e) => {
-            if (mesh.userData.rot !== e.rot) this._applyEquipTransform(mesh, e);
+        // Rooms live in state.equipment (they're bought, sold and saved like anything else) but
+        // they're drawn by _updateFloor as floor, so they get no mesh here — which also keeps them
+        // out of _pick()'s raycast, so clicking inside one lands on the tile and you can actually
+        // build there.
+        this._reconcile(this.equipMeshes, state.equipment.filter(e => !BUILD[e.type].room), e => this._buildEquip(e), (mesh, e) => {
+            // Position as well as rotation: the Move tool changes tx/tz without touching rot, and
+            // checking rot alone left the mesh sitting at its old spot until the page reloaded.
+            if (mesh.userData.rot !== e.rot || mesh.userData.tx !== e.tx || mesh.userData.tz !== e.tz)
+                this._applyEquipTransform(mesh, e);
             this._syncTray(mesh, e);
             const all = e.processing || [];
             const busy = all.length > 0;
             mesh.traverse(o => { if (o.userData.spin) o.visible = busy; });
+            // The burner is only alight for prep work — not for an analysis run on the same bench.
+            const prepping = all.some(pp => typeof pp.cap === 'string' && pp.cap.startsWith('prep'));
+            mesh.userData.prepping = prepping;
+            mesh.traverse(o => { if (o.userData.flame) o.visible = prepping; });
             // Cold-storage "slots" (dur: Infinity — a sample just parked in a fridge) don't
             // represent an actual running step, so they're excluded here: no progress bar, no
             // centrifuge spin for a machine that isn't really doing anything timed.
             const timed = all.filter(p => Number.isFinite(p.dur));
             mesh.userData.timedBusy = timed.length > 0;
-            if (timed.length) {
-                const avg = timed.reduce((sum, p) => sum + Math.min(1, p.t / p.dur), 0) / timed.length;
-                mesh.userData.progressFg.scale.x = Math.max(0.001, avg);
+            // Hinged parts: a centrifuge lid is shut exactly while the rotor is turning, a cold
+            // store's door is open exactly while somebody is stood at it shelving something.
+            const hinge = mesh.userData.hinge;
+            if (hinge) {
+                let open;
+                if (hinge.userData.hingeAxis === 'y') {
+                    // Watch for something actually landing in the machine rather than for a worker
+                    // standing at it: a drop-off is over inside one tick, so the worker's state has
+                    // already been cleared by the time this runs. Shelving into a cold store is the
+                    // one case with a real dwell, so that's caught by state as well. Either way the
+                    // door is then held open a beat so the swing is visible.
+                    const load = (e.staged ? e.staged.length : 0) + (e.processing ? e.processing.length : 0);
+                    const arrived = load > (mesh.userData.lastLoad ?? load);
+                    mesh.userData.lastLoad = load;
+                    const atIt = state.staff.some(w => w.job && w.job.stationId === e.id && w.state === 'storing');
+                    if (arrived || atIt) mesh.userData.doorHold = this.elapsed + 1.4;
+                    open = atIt || this.elapsed < (mesh.userData.doorHold || 0);
+                } else {
+                    open = !mesh.userData.timedBusy;        // centrifuge lid: shut while it spins
+                }
+                hinge.userData.hingeTarget = open ? hinge.userData.hingeOpen : 0;
             }
-            mesh.userData.progressGroup.visible = timed.length > 0;
+            mesh.userData.progress = timed.length
+                ? timed.reduce((sum, p) => sum + Math.min(1, p.t / p.dur), 0) / timed.length
+                : null;
 
             // Reliability light: red and blinking once broken (can't accept new work until a
             // mechanic fixes it), steady amber once worn enough that a breakdown becomes a real
@@ -1069,7 +1363,7 @@ class LabScene {
             mesh.userData.chatterEligible = idling && Math.hypot(s.wx - cm.x, s.wz - cm.z) < 2.0;
             mesh.userData.radioEligible = idling && state.upgrades.radio > 0;
         });
-        this.radioProp.visible = state.upgrades.radio > 0;
+        if (this.radioProp) this.radioProp.visible = state.upgrades.radio > 0;
 
         // dirt overlays
         const seen = new Set();
@@ -1099,14 +1393,45 @@ class LabScene {
         };
         this.equipMeshes.forEach((mesh) => {
             step(mesh);
-            if (mesh.userData.timedBusy) {
-                mesh.traverse(o => {
-                    if (o.userData.spinAnim) o.rotation.y += dt * 9;
-                    // Prep Robot gantry: slides back and forth along its rail while a run is
-                    // active, instead of just sitting there with a blinking light.
-                    if (o.userData.gantrySlide) o.position.x = Math.sin(this.elapsed * 2.6) * o.userData.gantryRange;
-                });
+            // A centrifuge runs through the whole sequence rather than doing everything at once:
+            // the lid comes down first, the rotor only winds up once it's actually shut, and when
+            // the run ends the rotor coasts to a stop before the lid is allowed back open —
+            // hingeInterlock is what holds it down in the meantime, the way a real one locks.
+            const hinge = mesh.userData.hinge;
+            let spinning = false;
+            mesh.traverse(o => { if (o.userData.spinAnim && (o.userData.spinVel || 0) > 0) spinning = true; });
+            let lidShut = true;
+            if (hinge) {
+                const ud = hinge.userData;
+                const target = (ud.hingeInterlock && spinning) ? 0 : ud.hingeTarget;
+                const k = Math.min(1, dt * HINGE_SPEED);
+                hinge.rotation[ud.hingeAxis] += (target - hinge.rotation[ud.hingeAxis]) * k;
+                lidShut = Math.abs(hinge.rotation[ud.hingeAxis]) < 0.05;
             }
+            const wantSpin = mesh.userData.timedBusy && lidShut;
+            mesh.traverse(o => {
+                if (o.userData.spinAnim) {
+                    // Ease toward full speed instead of snapping to it, so it visibly spins up
+                    // after the lid lands and spins down afterwards.
+                    const goal = wantSpin ? (o.userData.spinRate || 9) : 0;
+                    const v = o.userData.spinVel || 0;
+                    let next = v + (goal - v) * Math.min(1, dt * 3);
+                    // Easing alone only ever approaches zero, leaving the rotor creeping forever
+                    // and the lid interlock never satisfied — call it stopped once it's slower
+                    // than the eye can follow.
+                    if (!goal && next < 0.3) next = 0;
+                    o.userData.spinVel = next;
+                    o.rotation.y += dt * next;
+                }
+                // Prep Robot gantry: slides back and forth along its rail while a run is
+                // active, instead of just sitting there with a blinking light.
+                if (o.userData.flame && o.visible) {
+                    const f = 1 + Math.sin(this.elapsed * 13 + o.position.y * 40) * 0.22;
+                    o.scale.set(1 + (f - 1) * 0.35, f, 1 + (f - 1) * 0.35);
+                }
+                if (o.userData.gantrySlide && mesh.userData.timedBusy)
+                    o.position.x = Math.sin(this.elapsed * 2.6) * o.userData.gantryRange;
+            });
         });
         this.sampleMeshes.forEach((mesh, id) => {
             step(mesh);
@@ -1139,6 +1464,7 @@ class LabScene {
         });
         this._separateStaff();
         this._syncSpeechBubbles();
+        this._syncProgressBars();
 
         if (this.hoverTile && (!this.tool || this.tool === 'demolish' || this.tool === 'rotate')) {
             const w = tileToWorld(this.hoverTile.tx, this.hoverTile.tz);
@@ -1168,6 +1494,38 @@ class LabScene {
 
     // Projects every currently-chattering worker's head position to screen space and positions a
     // real DOM element there — crisp at any zoom, unlike a texture baked into the low-res 3D pass.
+    // Same trick as the speech bubbles: project the anchor point above each busy machine to screen
+    // space and park a real DOM bar there. Crisp at any zoom, and readable from every camera angle
+    // rather than turning edge-on when the view swings round.
+    _syncProgressBars() {
+        if (!this._barEls) this._barEls = new Map();
+        const rect = this.container.getBoundingClientRect();
+        const seen = new Set();
+        const v = new THREE.Vector3();
+        this.equipMeshes.forEach((mesh, id) => {
+            const pct = mesh.userData.progress;
+            if (pct == null) return;
+            v.set(mesh.position.x, mesh.userData.barY, mesh.position.z);
+            v.project(this.camera);
+            if (v.z > 1) return;                     // behind the camera
+            seen.add(id);
+            let el = this._barEls.get(id);
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'task-bar';
+                el.appendChild(document.createElement('i'));
+                this.container.appendChild(el);
+                this._barEls.set(id, el);
+            }
+            el.style.left = ((v.x * 0.5 + 0.5) * rect.width) + 'px';
+            el.style.top = ((1 - (v.y * 0.5 + 0.5)) * rect.height) + 'px';
+            el.firstChild.style.width = Math.round(Math.max(0, Math.min(1, pct)) * 100) + '%';
+        });
+        for (const [id, el] of this._barEls) {
+            if (!seen.has(id)) { el.remove(); this._barEls.delete(id); }
+        }
+    }
+
     _syncSpeechBubbles() {
         if (!this._bubbleEls) this._bubbleEls = new Map();
         const rect = this.container.getBoundingClientRect();
@@ -1205,6 +1563,9 @@ class LabScene {
     _separateStaff() {
         const meshes = Array.from(this.staffMeshes.values());
         const MIN_DIST = 0.46, PUSH = 0.5;
+        // Remember where everyone was before any nudging, so the clamp below can limit what this
+        // pass moved without also fighting the render's legitimate lag behind a walking worker.
+        for (const mesh of meshes) mesh.userData._preSep = { x: mesh.position.x, z: mesh.position.z };
         for (let i = 0; i < meshes.length; i++) {
             for (let j = i + 1; j < meshes.length; j++) {
                 const a = meshes[i], b = meshes[j];
@@ -1222,18 +1583,21 @@ class LabScene {
                 b.position.x += nx * push; b.position.z += nz * push;
             }
         }
-        // Belt and braces: whatever cosmetic nudging happened above (or the queue fan-out before
-        // it), a worker's rendered spot can never end up outside their own tile — a wall sits
-        // exactly half a tile from its centre, so this makes stepping through one impossible.
-        const MAX_DRIFT = 0.46;
+        // Cap how far the nudging above is allowed to shift anyone. This used to only apply to
+        // workers in a stationary state, which left idle and resting ones unclamped — exactly the
+        // ones that pile up together in the break room, where being shoved a whole tile sideways
+        // pushed them straight out through its walls. Clamping the nudge itself (rather than the
+        // distance to their simulated position) keeps them inside while still letting the render
+        // trail a worker who's genuinely mid-walk at 3x speed.
+        const MAX_NUDGE = 0.22;
         for (const mesh of meshes) {
-            const anchor = mesh.userData.truePos; if (!anchor) continue;
-            const dx = mesh.position.x - anchor.x, dz = mesh.position.z - anchor.z;
+            const p = mesh.userData._preSep; if (!p) continue;
+            const dx = mesh.position.x - p.x, dz = mesh.position.z - p.z;
             const d = Math.hypot(dx, dz);
-            if (d > MAX_DRIFT) {
-                const k = MAX_DRIFT / d;
-                mesh.position.x = anchor.x + dx * k;
-                mesh.position.z = anchor.z + dz * k;
+            if (d > MAX_NUDGE) {
+                const k = MAX_NUDGE / d;
+                mesh.position.x = p.x + dx * k;
+                mesh.position.z = p.z + dz * k;
             }
         }
     }
