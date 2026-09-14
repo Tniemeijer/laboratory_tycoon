@@ -42,6 +42,9 @@ export function abandonSample(id) {
     }
     s.samples.splice(i, 1);
 }
+// Lets incidents.js write off whatever a burning or quarantined machine was holding without
+// importing this module (which imports equipment.js, which would close the loop).
+G.abandonSample = abandonSample;
 
 export function updateSamples(dt) {
     const s = G.state;

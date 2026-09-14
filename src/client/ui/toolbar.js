@@ -5,7 +5,9 @@
 import {
     G, BUILD, labLevel, repToNext, cleanliness, roomAt,
     canPlace, canAfford, isUnlocked, placeEquipment, rotateEquipment, moveEquipment, demolish,
-    togglePause, cycleSpeed, newGame
+    togglePause, cycleSpeed, newGame,
+    evacuate, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
+    DISINFECT_FEE, FIRE_BRIGADE_FEE
 } from '../game.js';
 import { BUILDERS, wireMenu, setToolHandler } from './menus.js';
 
@@ -14,6 +16,10 @@ let openMenu = null;
 // The machine currently picked up by the Move tool, if any. Purely UI state: the game doesn't
 // know a move is in progress until it's actually dropped somewhere.
 let moveId = null;
+// How many tiles the current room-painting selection has laid. Counting the lab's tiles of that
+// type instead would fold in rooms built earlier, which reads as nonsense the moment you extend
+// a second Dark Room.
+let paintCount = 0;
 let lastRev = -1;
 let toastTimer = null;
 
@@ -101,6 +107,7 @@ export function selectTool(t) {
     G.tool = (G.tool === t) ? null : t;
     G.ghostRot = 0;
     moveId = null;
+    paintCount = 0;
     G.scene.setTool(G.tool);
     hint();
     if (G.tool && openMenu === 'build') closeMenu();   // clear the view to place
@@ -145,6 +152,10 @@ function hint() {
             : 'Click a machine or room floor to pick it up and move it. (Esc to stop)';
         pill.hidden = moveId == null;
     }
+    else if (BUILD[G.tool].room) {
+        h.textContent = `Laying ${BUILD[G.tool].name} — keep clicking tiles to extend it${paintCount ? ` (${paintCount} laid)` : ''} · Esc when done`;
+        pill.hidden = true;                                  // floor has no orientation to set
+    }
     else { h.textContent = `Placing ${BUILD[G.tool].name} — click a tile · Esc to cancel`; pill.hidden = false; }
 }
 function refreshGhost() {
@@ -177,8 +188,19 @@ export const sceneHandlers = {
             return;
         }
         if (G.tool && BUILD[G.tool]) {
-            // one placement per selection, so a stray click right after can't buy a second one
-            if (placeEquipment(G.tool, tx, tz, G.ghostRot)) selectTool(null);
+            // Machines drop the tool after one placement, so a stray second click can't buy a
+            // machine you didn't mean to. Room floor is the opposite case: a room is laid a tile
+            // at a time and is usually several tiles, so the tool stays live and you paint it on,
+            // Esc (or picking something else) when you're done. Same reasoning as a tile brush in
+            // any level editor — going back to the Build menu between every tile is the whole
+            // complaint.
+            const painting = !!BUILD[G.tool].room;
+            const placed = placeEquipment(G.tool, tx, tz, G.ghostRot);
+            if (placed && !painting) selectTool(null);
+            else if (painting) {
+                if (placed) paintCount++;
+                hint(); refreshGhost();                      // re-validate the ghost under the cursor
+            }
             return;
         }
         // Rooms render as floor and have no model to click, so selling or inspecting one comes
@@ -262,8 +284,69 @@ export function render(force) {
     clean.textContent = '🧹 ' + cl + '%';
     clean.className = 'stat ' + (cl < 40 ? 'bad' : cl < 70 ? 'mid' : 'good');
 
+    renderAlerts(s);
+
     if (force || s.uiRev !== lastRev) {
         lastRev = s.uiRev;
         if (openMenu) renderDropdown();
     }
+}
+
+// ---------- emergency banner ----------
+// Rebuilt only when its text actually changes: this runs every frame (the brigade's ETA ticks in
+// real time), and blowing away the buttons each frame would make them unclickable.
+let lastAlertKey = '', lastBarBottom = -1;
+function renderAlerts(s) {
+    const el = $('alerts');
+    // Sit just under the top bar wherever it currently ends — it's two rows tall on a wide screen,
+    // one when collapsed, and more again when the menu row wraps on a phone. A fixed offset put
+    // the banner straight over the menu buttons at some widths. Only written when it actually
+    // moves: this runs every frame, and an unconditional style write forces a layout each one.
+    const bottom = Math.round($('bar').getBoundingClientRect().bottom + 6);
+    if (bottom !== lastBarBottom) { lastBarBottom = bottom; el.style.top = bottom + 'px'; }
+    const items = [];
+
+    const visitors = s.visitors || [];
+    const fireCrew = visitors.filter(v => v.kind === 'firefighter').length;
+    const cleanCrew = visitors.filter(v => v.kind === 'cleaner').length;
+
+    if ((s.fires || []).length) {
+        const n = s.fires.length;
+        const eta = s.brigadeEta != null ? Math.max(0, Math.ceil(s.brigadeEta)) : null;
+        let body = `<b>🔥 FIRE</b> — ${n} machine${n > 1 ? 's' : ''} alight. It spreads, and anyone stood near it can be killed.`;
+        const btns = [];
+        if (!s.evacuating) btns.push('<button class="mini" data-evac>Evacuate the building</button>');
+        else body += ' <b>Evacuating.</b>';
+        if (fireCrew) body += ` Fire crew is on the floor working through them.`;
+        else if (eta == null) btns.push(`<button class="mini" data-brigade>Call the fire brigade — $${FIRE_BRIGADE_FEE.toLocaleString()}</button>`);
+        else body += ` Brigade arriving in ${eta}s.`;
+        items.push({ cls: 'alert fire', html: body + (btns.length ? `<div class="row">${btns.join('')}</div>` : '') });
+    }
+
+    if (s.outbreak) {
+        const crew = s.outbreak.crewDay;
+        let body = `<b>☣ CONTAINMENT BREACH</b> — the ${s.outbreak.source} let something out on Day ${s.outbreak.day}. The room is sealed and nothing in it can be used.`;
+        body += cleanCrew ? ` <b>Crew is in there fogging it now.</b>`
+              : crew != null ? ` Disinfection crew due <b>Day ${crew}</b>.`
+              : `<div class="row"><button class="mini" data-disinfect>Call a disinfection crew — $${DISINFECT_FEE.toLocaleString()}, arrives Day ${s.day + 1}</button></div>`;
+        items.push({ cls: 'alert', html: body });
+    }
+
+    for (const l of (s.lawsuits || [])) {
+        items.push({ cls: 'alert', html:
+            `<b>⚖ CLAIM</b> — ${l.name}'s family are suing over the ${l.cause} for $${l.claim.toLocaleString()}. Answer by <b>Day ${l.deadline}</b> or it's heard without you.` +
+            `<div class="row"><button class="mini" data-settle="${l.id}">Settle — $${settlementOf(l).toLocaleString()}</button>` +
+            `<button class="mini" data-fight="${l.id}">Fight it</button></div>` });
+    }
+
+    const key = items.map(i => i.cls + i.html).join('|');
+    if (key === lastAlertKey) return;
+    lastAlertKey = key;
+    el.hidden = !items.length;
+    el.innerHTML = items.map(i => `<div class="${i.cls}">${i.html}</div>`).join('');
+    el.querySelectorAll('[data-evac]').forEach(b => b.onclick = () => evacuate());
+    el.querySelectorAll('[data-brigade]').forEach(b => b.onclick = () => callFireBrigade());
+    el.querySelectorAll('[data-disinfect]').forEach(b => b.onclick = () => callDisinfection());
+    el.querySelectorAll('[data-settle]').forEach(b => b.onclick = () => settleLawsuit(+b.dataset.settle));
+    el.querySelectorAll('[data-fight]').forEach(b => b.onclick = () => fightLawsuit(+b.dataset.fight));
 }

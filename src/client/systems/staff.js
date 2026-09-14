@@ -3,22 +3,23 @@
 // protocol step at the right machine, or mop, or brew a batch of reagent from raw ingredient.
 
 import {
+    EVAC_SPEED_MUL,
     BUILD, PROTOCOLS, REAGENTS, REAGENT_BATCH, REAGENT_MIN, REAGENT_PREP_TIME, REAGENT_WATER_COST,
     WATER_BATCH, WATER_MIN, WATER_FILL_TIME, COLD_STORE_THRESHOLD, COLD_STORE_TIME, CAP_LABEL, SURNAMES,
-    MECH_REPAIR_TIME, MECH_REPAIR_COST, MECH_MAINT_TIME, BATCH_LOAD_TIME, IDLE_GRACE_PERIOD,
+    BATCH_LOAD_TIME, IDLE_GRACE_PERIOD,
     SKIN_TONES, HAIR_COLORS,
-    SKILL_XP_PER_RUN, SKILL_XP_PER_EXTRA_SAMPLE, SKILL_XP_PER_LEVEL, SKILL_MAX_LEVEL,
+    SKILL_CAP_ALIAS, SKILL_XP_PER_RUN, SKILL_XP_PER_EXTRA_SAMPLE, SKILL_XP_PER_LEVEL, SKILL_MAX_LEVEL,
     SKILL_SPEED_PER_LEVEL, SKILL_QUALITY_PER_LEVEL
 } from '../data.js';
 import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyUI, cartCapacity, equipCaps } from '../core.js';
-import { GRID, tileToWorld, worldToTile, footTiles, restTile, gateWorld } from '../grid.js';
+import { GRID, tileToWorld, worldToTile, footTiles, restTile, gateWorld, musterTile } from '../grid.js';
 import { aStar, nearestAccess } from '../pathfind.js';
 import { addDirt, recomputeGrime, topDirtTile } from './dirt.js';
 import { curStep, isInert } from './samples.js';
 import { completeContract } from './contracts.js';
-import {
-    stageSample, batchReady, startRun, findBrokenEquipment, findNeedsMaintenance, finishRepair, finishMaintenance
-} from './equipment.js';
+import { stageSample, batchReady, startRun } from './equipment.js';
+import { isBurning, isQuarantined } from './incidents.js';
+import { underService } from './visitors.js';
 
 const STAFF_SPEED = 2.7;
 
@@ -30,7 +31,7 @@ export function hireStaff() {
     const w = gateWorld();          // walks in the front door, like a new hire should
     s.staff.push({
         id: nid(), name: SURNAMES[Math.floor(Math.random() * SURNAMES.length)],
-        caps: { process: true, clean: true, mechanic: false }, wx: w.x, wz: w.z, state: 'idle',
+        caps: { process: true, clean: true }, wx: w.x, wz: w.z, state: 'idle',
         job: null, carrying: null, reservedStation: null,
         path: null, pathV: -1, tendTimer: 0,
         skin: SKIN_TONES[Math.floor(Math.random() * SKIN_TONES.length)],
@@ -74,10 +75,6 @@ function resetWorker(w) {
         const e = G.state.equipment.find(x => x.id === w.job.operateId);
         if (e && e.operateClaim === w.id) e.operateClaim = null;
     }
-    if (w.job && w.job.fixId != null) {
-        const e = G.state.equipment.find(x => x.id === w.job.fixId);
-        if (e && e.fixClaim === w.id) e.fixClaim = null;
-    }
     releaseReservation(w);
     const ids = w.job ? (w.job.sampleIds || (w.job.coldSampleId != null ? [w.job.coldSampleId] : [])) : [];
     for (const id of ids) {
@@ -110,7 +107,7 @@ function stepPath(w, dt) {
     const dx = wt.x - w.wx, dz = wt.z - w.wz;
     const d = Math.hypot(dx, dz);
     if (d < 0.1) { w.path.shift(); return w.path.length === 0 ? 'arrived' : 'moving'; }
-    const step = Math.min(d, STAFF_SPEED * staffSpeedMul() * dt);
+    const step = Math.min(d, STAFF_SPEED * staffSpeedMul() * (G.state.evacuating ? EVAC_SPEED_MUL : 1) * dt);
     w.wx += dx / d * step; w.wz += dz / d * step;
     return 'moving';
 }
@@ -119,11 +116,14 @@ function setGoalTile(w, tile) { w.goal = tile; w.path = null; }
 // A worker's level at a given task (cap), derived from accumulated XP rather than stored
 // directly — keeps the save format simple and means tuning SKILL_XP_PER_LEVEL retroactively
 // re-levels everyone instead of leaving old saves stuck at stale numbers.
+export function skillCap(cap) { return SKILL_CAP_ALIAS[cap] || cap; }
 function skillLevel(w, cap) {
+    cap = skillCap(cap);
     const xp = (w.skillXp && w.skillXp[cap]) || 0;
     return Math.min(SKILL_MAX_LEVEL, Math.floor(xp / SKILL_XP_PER_LEVEL));
 }
 function grantSkillXp(w, cap, n) {
+    cap = skillCap(cap);
     w.skillXp ||= {};
     w.skillXp[cap] = (w.skillXp[cap] || 0) + SKILL_XP_PER_RUN + SKILL_XP_PER_EXTRA_SAMPLE * (n - 1);
 }
@@ -159,7 +159,11 @@ function accessTile(e, from) {
 }
 
 function freeSlots(e) { return (BUILD[e.type].slots || 0) - (e.processing ? e.processing.length : 0) - (e.reserved || 0); }
-function stationsFor(cap) { return G.state.equipment.filter(e => equipCaps(e).includes(cap)); }
+// A machine that's on fire, or shut inside a sealed containment room, is off the board: nobody
+// is sent to it and nothing is counted as served by it, so work reroutes to whatever's left
+// rather than piling up outside a door that won't open.
+export function stationUsable(e) { return !isBurning(e) && !isQuarantined(e) && !underService(e); }
+function stationsFor(cap) { return G.state.equipment.filter(e => stationUsable(e) && equipCaps(e).includes(cap)); }
 // A station's batch capacity is shared across every cap it serves — a bench holding 3 samples
 // for prep has no room left for analysis either, they're the same 3 physical slots. Occupancy
 // counts what's actually staged there (any cap) plus samples already claimed and walking toward
@@ -242,41 +246,6 @@ function claimMop(w, dirtiest) {
     w.state = 'toMop';
 }
 
-// Mechanics do only repair/maintenance work — never processing or cleaning, and no other role
-// ever picks up a wrench. That's deliberate: a broken machine genuinely needs a mechanic hired,
-// not just any free scientist wandering over to fix it.
-//
-// e.fixClaim marks a machine as already being headed to by someone — without it, every free
-// mechanic would independently pick the same broken/worn machine in the same tick (nothing here
-// stopped them), all converge on it together, and then every one but whoever actually arrived
-// first would get reset() the instant the winner fixed it and the 'toRepair'/'toMaintain' guard
-// re-checked and found it no longer broken/worn — read as a group forming up, then scattering
-// back to idle a moment later, then re-forming on the next thing that needed attention.
-function assignMechanicJob(w) {
-    const from = worldToTile(w.wx, w.wz);
-    if (G.state.money >= MECH_REPAIR_COST) {
-        for (const e of findBrokenEquipment()) {
-            if (e.fixClaim != null) continue;
-            const acc = accessTile(e, from);
-            if (!acc) continue;
-            e.fixClaim = w.id;
-            w.job = { fixId: e.id };
-            setGoalTile(w, acc); w.state = 'toRepair';
-            return true;
-        }
-    }
-    for (const e of findNeedsMaintenance()) {
-        if (e.fixClaim != null) continue;
-        const acc = accessTile(e, from);
-        if (!acc) continue;
-        e.fixClaim = w.id;
-        w.job = { fixId: e.id };
-        setGoalTile(w, acc); w.state = 'toMaintain';
-        return true;
-    }
-    return false;
-}
-
 // A full (or timed-out) batch sitting staged doesn't run itself — someone has to walk over and
 // start it. Checked before fetching more raw samples so a loaded machine gets attended to
 // promptly instead of sitting untouched while everyone's off doing something else.
@@ -291,6 +260,7 @@ function findReadyBatchJob(w) {
     const from = worldToTile(w.wx, w.wz);
     for (const e of s.equipment) {
         if (BUILD[e.type].autoStart || e.operateClaim != null) continue;   // starts itself — see updateEquipment()
+        if (!stationUsable(e)) continue;
         const group = batchReady(e);
         if (!group) continue;
         const acc = accessTile(e, from);
@@ -309,7 +279,6 @@ function assignJob(w) {
     // Mechanic work is checked first for anyone who can do it — a broken or worn machine sitting
     // idle is worse than a delayed sample fetch — but it's no longer exclusive: a worker with
     // Process + Mechanic both checked falls through to normal work once nothing needs fixing.
-    if (caps.mechanic && assignMechanicJob(w)) return true;
     const dirtiest = caps.clean ? topDirtTile() : null;
 
     if (dirtiest && (!caps.process || cleanliness() < 65)) {
@@ -335,7 +304,7 @@ function assignJob(w) {
         if (candidate) {
             const from = worldToTile(w.wx, w.wz);
             for (const e of s.equipment) {
-                if (BUILD[e.type].kind !== 'cold' || freeSlots(e) <= 0) continue;
+                if (BUILD[e.type].kind !== 'cold' || !stationUsable(e) || freeSlots(e) <= 0) continue;
                 const acc = accessTile(e, from);
                 if (!acc) continue;
                 candidate.claimedBy = w.id;
@@ -352,7 +321,7 @@ function assignJob(w) {
     if (caps.process && s.water < WATER_MIN) {
         const from = worldToTile(w.wx, w.wz);
         for (const e of s.equipment) {
-            if (BUILD[e.type].kind !== 'water' || freeSlots(e) <= 0) continue;
+            if (BUILD[e.type].kind !== 'water' || !stationUsable(e) || freeSlots(e) <= 0) continue;
             const acc = accessTile(e, from);
             if (!acc) continue;
             e.reserved = (e.reserved || 0) + 1;
@@ -398,11 +367,36 @@ export function updateStaff(dt) {
         const cap = curStep(sm).cap;
         if (!stationsFor(cap).length && !s.warns['notool_' + cap]) {
             s.warns['notool_' + cap] = 1;
-            G.onToast(`No machine for the "${CAP_LABEL[cap]}" step — build one`, true);
+            // Distinguish "you never built one" from "the one you have is shut inside a sealed
+            // room" — the advice is completely different, and telling someone mid-outbreak to go
+            // and build another Flow Hood is the wrong one.
+            const shutAway = s.equipment.some(e => !stationUsable(e) && equipCaps(e).includes(cap));
+            G.onToast(shutAway
+                ? `The only machine for the "${CAP_LABEL[cap]}" step is out of reach — work is on hold`
+                : `No machine for the "${CAP_LABEL[cap]}" step — build one`, true);
         }
     }
 
+    let musterIdx = 0, homeIdx = 0;
     for (const w of s.staff) {
+        // Two reasons someone isn't working: the building is being evacuated, or they're off
+        // sick after an exposure. Both send them to the pavement outside and keep them there —
+        // checked before anything else so no job can be assigned or continued in the meantime.
+        const out = s.evacuating ? 'evacuating' : (w.illUntil != null && s.day < w.illUntil ? 'sick' : null);
+        if (out) {
+            if (w.state !== out && w.state !== out + 'Done') {
+                resetWorker(w);
+                w.state = out;
+                setGoalTile(w, musterTile(out === 'evacuating' ? musterIdx++ : 8 + homeIdx++));
+            } else if (out === 'evacuating') musterIdx++; else homeIdx++;
+            if (w.state === out) {
+                const r = stepPath(w, dt);
+                if (r === 'arrived' || r === 'blocked') w.state = out + 'Done';
+            }
+            continue;
+        }
+        if (w.state === 'sickDone') { w.state = 'idle'; w.path = null; }
+
         if (w.state === 'idle' || w.state === 'resting') {
             if (!assignJob(w)) {
                 if (w.state === 'resting') {
@@ -540,46 +534,6 @@ export function updateStaff(dt) {
                 const e = s.equipment.find(x => x.id === w.job.operateId);
                 const stillRunning = e && e.processing && e.processing.includes(w.job.tendEntry);
                 if (!stillRunning) resetWorker(w);   // run finished (or the machine's gone) — free up
-                break;
-            }
-            case 'toRepair': {
-                const e = s.equipment.find(x => x.id === w.job.fixId);
-                if (!e || !e.broken) { resetWorker(w); break; }
-                const r = stepPath(w, dt);
-                if (r === 'blocked') resetWorker(w);
-                else if (r === 'arrived') {
-                    if (s.money < MECH_REPAIR_COST) { resetWorker(w); break; }
-                    s.money -= MECH_REPAIR_COST;
-                    w.state = 'repairing'; w.tendTimer = 0;
-                    dirtyUI();
-                }
-                break;
-            }
-            case 'repairing': {
-                const e = s.equipment.find(x => x.id === w.job.fixId);
-                if (!e) { resetWorker(w); break; }
-                w.tendTimer += dt;
-                if (w.tendTimer < MECH_REPAIR_TIME) break;
-                finishRepair(e);
-                G.onToast(`${BUILD[e.type].name} repaired`);
-                resetWorker(w);
-                break;
-            }
-            case 'toMaintain': {
-                const e = s.equipment.find(x => x.id === w.job.fixId);
-                if (!e || e.broken) { resetWorker(w); break; }
-                const r = stepPath(w, dt);
-                if (r === 'blocked') resetWorker(w);
-                else if (r === 'arrived') { w.state = 'maintaining'; w.tendTimer = 0; }
-                break;
-            }
-            case 'maintaining': {
-                const e = s.equipment.find(x => x.id === w.job.fixId);
-                if (!e) { resetWorker(w); break; }
-                w.tendTimer += dt;
-                if (w.tendTimer < MECH_MAINT_TIME) break;
-                finishMaintenance(e);
-                resetWorker(w);
                 break;
             }
             case 'toPrep': {

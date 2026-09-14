@@ -7,12 +7,13 @@ import {
     orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
     WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, LOAN_INTEREST_RATE, LOAN_MAX,
     SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP, LOAN_INTEREST_DAYS, LOAN_STEP,
-    interestDue, nextInterestDay,
+    interestDue, nextInterestDay, mechanicQuote, mechanicOnSite, alarmReliability,
     labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps,
     cleanliness, ownedTileCount, utilityBreakdown, reagentCount,
-    acceptContract, hireStaff, toggleStaffCap, buyUpgrade, buyZone, toggleAutoPrep, toggleColdStore,
+    acceptContract, hireStaff, toggleStaffCap, buyUpgrade, buyZone, toggleAutoPrep, toggleColdStore, callMechanic,
     borrowLoan, repayLoan
 } from '../game.js';
+import { sealedRooms } from '../grid.js';
 
 const CAT_ORDER = ['Processing', 'Storage', 'Utility'];
 // Rooms have no caps of their own to list — what they're worth is whatever they add to a machine
@@ -21,7 +22,7 @@ const CAT_ORDER = ['Processing', 'Storage', 'Utility'];
 const roomGrantLabel = (kind) => {
     const grants = ROOM_BONUS_CAP[kind] || {};
     const parts = Object.entries(grants).map(([type, cap]) => `+${CAP_LABEL[cap]} for a ${BUILD[type].name}`);
-    return `2×2 room · ${parts.join(', ') || 'better-quality runs'}`;
+    return `room floor, 1 tile · ${parts.join(', ') || 'better-quality runs'}`;
 };
 const roomBonusFor = (type) => Object.entries(ROOM_BONUS_CAP)
     .filter(([, grants]) => grants[type])
@@ -33,8 +34,8 @@ let loanAmount = 2000;
 export function adjustLoanAmount(dir) {
     loanAmount = Math.max(LOAN_STEP, Math.min(LOAN_MAX, loanAmount + dir * LOAN_STEP));
 }
-const STAFF_CAPS = ['process', 'clean', 'mechanic'];
-const STAFF_CAP_LABEL = { process: 'Process', clean: 'Clean', mechanic: 'Mechanic' };
+const STAFF_CAPS = ['process', 'clean'];
+const STAFF_CAP_LABEL = { process: 'Process', clean: 'Clean' };
 let _onToolSelect = () => {};
 export function setToolHandler(fn) { _onToolSelect = fn; }
 
@@ -164,7 +165,7 @@ export const BUILDERS = {
         h += `<div class="dd-sub">Scientists <span class="dim">tick what each one is allowed to do</span></div><div class="col">`;
         for (const w of s.staff) {
             h += `<div class="staff">
-                <div class="s-top"><span>${w.name}</span><span class="dim">${labelState(w.state)}</span></div>
+                <div class="s-top"><span>${w.name}${w.illUntil != null ? ' 🤒' : ''}</span><span class="dim">${w.illUntil != null ? `off sick until Day ${w.illUntil}` : labelState(w.state)}</span></div>
                 <div class="roles">
                   ${STAFF_CAPS.map(c =>
                     `<button class="r cb ${w.caps[c] ? 'on' : ''}" data-cap="${w.id}:${c}">${w.caps[c] ? '☑' : '☐'} ${STAFF_CAP_LABEL[c]}</button>`).join('')}
@@ -263,17 +264,49 @@ export const BUILDERS = {
               <div class="c-org">Cold storage: ${coldUsed()}/${coldCapacity()} shelves used · Lab Rating ${labLevel()}${repToNext() ? ` (next at ${repToNext()} rep)` : ' (max)'}</div>`;
         if (cl < 40) h += `<div class="c-org warnline">Filthy: slower steps, lower quality, contamination risk. Assign a cleaner.</div>`;
 
-        const machines = s.equipment.filter(e => BUILD[e.type].cat === 'Processing');
+        // Includes the fire alarm: it's on the mechanic's list too, so leaving it out here made
+        // the call-out quote below count a machine the player couldn't see anywhere.
+        const machines = s.equipment.filter(e => BUILD[e.type].cat === 'Processing' || BUILD[e.type].mount);
         const broken = machines.filter(e => e.broken);
         const worn = machines.filter(e => !e.broken && (e.condition ?? 100) < MECH_MAINT_THRESHOLD);
         if (machines.length) {
             h += `<div class="dd-sub">Equipment</div>`;
             if (broken.length)
-                h += `<div class="c-org warnline">Broken down: ${broken.map(e => BUILD[e.type].name).join(', ')} — needs a Mechanic.</div>`;
+                h += `<div class="c-org warnline">Broken down: ${broken.map(e => BUILD[e.type].name).join(', ')} — dead until a mechanic's been in.</div>`;
             if (worn.length)
                 h += `<div class="c-org">Showing wear: ${worn.map(e => `${BUILD[e.type].name} (${Math.round(e.condition)}%)`).join(', ')}.</div>`;
             if (!broken.length && !worn.length) h += `<div class="c-org">All ${machines.length} machines in good condition.</div>`;
+            const q = mechanicQuote(), onSite = mechanicOnSite();
+            if (onSite) {
+                h += `<div class="c-org">The mechanic is on the floor now — ${onSite.left} machine${onSite.left === 1 ? '' : 's'} still to get to. Each one is billed as they finish it.</div>`;
+                h += `<button class="mini" disabled>Mechanic on site</button>`;
+            } else if (s.mechanicDay != null) {
+                h += `<div class="c-org">Mechanic booked for <b>Day ${s.mechanicDay}</b> — they'll let themselves in that morning and work down the list on the floor, machine by machine.</div>`;
+                h += `<button class="mini" disabled>Mechanic booked</button>`;
+            } else if (q.broken || q.worn) {
+                h += `<div class="c-org">A call-out covers the lot in one visit: ${q.broken} to repair, ${q.worn} to service. The fee is charged per visit, so there's a saving in letting a couple pile up — as long as you can spare the machines. They work in the open, one machine at a time, and whatever they're stood at can't be used until they've moved on.</div>`;
+                h += `<button class="mini" data-mech>Call a mechanic — about $${q.cost.toLocaleString()}, arrives Day ${s.day + 1}</button>`;
+            }
         }
+
+        // Safety — the alarm is the only thing in the lab whose *condition* decides whether it
+        // works when it matters, so it gets its own line rather than sitting in the wear list.
+        h += `<div class="dd-sub">Safety</div>`;
+        const alarms = s.equipment.filter(e => BUILD[e.type].mount);
+        if (!alarms.length) {
+            h += `<div class="c-org warnline">No fire alarm. Worn equipment can catch fire, and without one nobody evacuates until you notice and press the button yourself. Build one from Build → Utility.</div>`;
+        } else {
+            const rel = Math.round(alarmReliability() * 100);
+            h += `<div class="c-org">${alarms.length} fire alarm${alarms.length > 1 ? 's' : ''} — about <b class="${rel < 50 ? 'bad' : rel < 80 ? 'mid' : 'good'}">${rel}%</b> likely to trip and call the brigade for you. Servicing them raises that.</div>`;
+        }
+        const sealed = sealedRooms(s);
+        if (sealed.length)
+            h += `<div class="c-org warnline">${sealed.length} room${sealed.length > 1 ? 's have' : ' has'} no way in — place a Door (or an Airlock, for a Cleanroom or Containment Lab) on one of its tiles or nothing inside will ever be used.</div>`;
+        const contain = s.equipment.filter(e => BUILD[e.type].kind === 'contain');
+        if (contain.length && !s.outbreak)
+            h += `<div class="c-org">Containment floor is clear. Neglected equipment standing on it can breach and seal the room.</div>`;
+        if (st.fires || st.outbreaks || st.deaths)
+            h += `<div class="c-org">Incident record: ${st.fires || 0} fire(s), ${st.outbreaks || 0} breach(es), <b class="${st.deaths ? 'bad' : ''}">${st.deaths || 0} death(s)</b>.</div>`;
 
         h += `<div class="dd-sub">Finance</div>`;
         if (s.loan > 0) {
@@ -317,11 +350,16 @@ export const BUILDERS = {
         h += `<div class="dd-sub">Protocols</div>
             <div class="c-org">Every contract runs a chain like Prep › Spin › Analyze. Each link needs a specific machine — the chain shown on a contract turns green for steps you already own, red for ones you don't. Samples don't all show up the day you accept — a big order ships in a few batches over the deadline, shown on the contract card.</div>`;
         h += `<div class="dd-sub">Batching</div>
-            <div class="c-org">A scientist drops a sample off at a machine and is immediately free again — the sample waits there instead of tying anyone up. Centrifuges, benches and analyzers hold several samples per run (see the batch size in <b>Build</b>). Once enough matching samples pile up — or after a while even with just one waiting — a free scientist walks over and starts the run. Automated equipment then finishes on its own. Hands-on kit doesn't: a Lab Bench, Microscope, Analysis Desk, Flow Hood or Fume Hood keeps whoever started the run there until it's done, so those tie up a scientist as well as a machine. Big contracts move through equipment far faster if you let samples stack up rather than chasing each one solo. A <b>Prep Robot</b> skips the "walk over and start it" step entirely for prep runs, and doesn't need anyone to stay — pricier, but fully automated. A <b>Sample Cart</b> upgrade lets one trip carry several matching samples at once instead of one at a time.</div>`;
+            <div class="c-org">A scientist drops a sample off at a machine and is immediately free again — the sample waits there instead of tying anyone up. Centrifuges, benches and hoods hold several samples per run (see the batch size in <b>Build</b>). Once enough matching samples pile up — or after a while even with just one waiting — a free scientist walks over and starts the run. Automated equipment then finishes on its own. Hands-on kit doesn't: a Lab Bench, Microscope, Analysis Desk, Flow Hood or Fume Hood keeps whoever started the run there until it's done, so those tie up a scientist as well as a machine. Big contracts move through equipment far faster if you let samples stack up rather than chasing each one solo. A <b>Prep Robot</b> skips the "walk over and start it" step entirely for prep runs, and doesn't need anyone to stay — pricier, but fully automated. A <b>Sample Cart</b> upgrade lets one trip carry several matching samples at once instead of one at a time.</div>`;
         h += `<div class="dd-sub">Equipment Wear</div>
-            <div class="c-org">Every run wears a machine down a little, and a worn one runs slower and risks breaking outright. A broken machine sits dead until fixed — tick <b>Mechanic</b> for a scientist in <b>Staff</b>: they'll service worn machines before they fail, and repair (for a fee) any that already have. Nobody without it checked will touch a wrench.</div>`;
-        h += `<div class="dd-sub">Rooms</div>
-            <div class="c-org">Cleanrooms, Dark Rooms and the ML containment labs are <i>floor</i>, not machines: they lay a 2×2 patch of tinted, walled-off floor that you then build equipment on top of, and you can lay one over machines you already own. Put two of the same kind flush against each other and they merge into one bigger room. Nothing <i>needs</i> a room to work — every machine does its own job standing on the open floor. What a room adds is extra capability for whatever's inside it: a Microscope in a <b>Dark Room</b> also does fluorescence, a Chromatograph in a <b>Cleanroom</b> also does pharma-grade Chroma, and a Flow Hood in a <b>Containment Lab</b> handles work with biological and genetically modified agents. On top of that, any run on a machine inside any room comes out slightly higher quality. Sell a room by clicking its bare floor with <b>Demolish</b>.</div>`;
+            <div class="c-org">Every run wears a machine down a little, and a worn one runs slower and risks breaking outright. A broken machine sits dead until it's fixed, and nobody on your payroll does that — maintenance is a trade you call in from <b>Lab</b>. Book one and they let themselves in the next morning and work down the list on the floor in front of you, machine by machine, billing each as they finish; whatever they're currently stood at can't be used until they move on. There's a flat call-out fee on top of the per-machine charge, so letting a couple of jobs pile up is cheaper than ringing them every time something wears — as long as you can spare the machines in the meantime.</div>`;
+        h += `<div class="dd-sub">Fire, Breaches & Claims</div>
+            <div class="c-org">Neglect has worse outcomes than a breakdown. A machine that finishes a run in poor condition can <b>catch fire</b> — it spreads to anything within a couple of tiles, destroys what it burns, and kills anyone who stays near it. A red banner appears at the top of the screen with two things you can do: <b>evacuate</b> the building, and <b>call the fire brigade</b>. A wall-mounted <b>Fire Alarm</b> does both for you the moment something ignites — but only if it works, and an alarm rots on the wall whether or not you use it, so it needs servicing like anything else. Its current reliability is shown under <b>Lab</b>.</div>
+            <div class="c-org">Neglected equipment standing in a <b>Containment Lab</b> can also breach. The room seals itself — nothing in it can be used and nobody can go in — and whoever was inside may come down with something and be off sick for days. It stays sealed until you book a <b>disinfection crew</b> from the banner; they come the next morning.</div>
+            <div class="c-org">If a scientist dies, their family sue. You can <b>settle</b> for less than the claim, or <b>fight it</b> — cheaper if you win, considerably worse if you don't. Ignore it until the deadline and it's heard without you, which is the worst of both.</div>`;
+        h += `<div class="dd-sub">Rooms & Doors</div>
+            <div class="c-org">Dark Rooms, Cleanrooms and Containment Labs are <i>floor</i>, not machines: you lay them one tile at a time in whatever shape you want, over machines you already own if you like, and tiles laid flush merge into one room. Nothing <i>needs</i> a room to work — every machine does its own job on the open floor. What a room adds is extra capability for what's inside it: a Microscope in a <b>Dark Room</b> also does fluorescence, a Chromatograph in a <b>Cleanroom</b> also does pharma-grade Chroma, and a Flow Hood, Incubator and Microscope in a <b>Containment Lab</b> handle contained work end to end. Any run inside any room also comes out slightly higher quality.</div>
+            <div class="c-org">A room is walled all the way round and <b>you decide where the way in goes</b>: place a <b>Door</b> (or an <b>Airlock</b>) on one of the room's own tiles, facing outward — rotate before placing. Lay a room with no door and it's sealed: nobody can get in and nothing inside will ever be used. A Dark Room takes a plain Door; a Cleanroom or Containment Lab has to have an Airlock, because a single door won't hold the air — and that's where staff gown up, which you'll see them do as they pass through. Sell a room or a door by clicking it with <b>Demolish</b>.</div>`;
         h += `<div class="dd-sub">Stock & Reagents</div>
             <div class="c-org">Some prep steps consume a stock solution (Saline, Solvent, Buffer). Buy the raw ingredient in <b>Stock</b>, build a Sink for distilled water, and auto-prep turns both into reagent automatically.</div>`;
         h += `<div class="dd-sub">Cold Storage</div>
@@ -365,6 +403,8 @@ export function wireMenu(menu, dd) {
         dd.querySelectorAll('[data-up]').forEach(el =>
             el.addEventListener('click', () => buyUpgrade(el.dataset.up)));
     } else if (menu === 'lab') {
+        const mech = dd.querySelector('[data-mech]');
+        if (mech) mech.addEventListener('click', () => callMechanic());
         const rp = dd.querySelector('[data-repay]');
         if (rp) rp.addEventListener('click', () => repayLoan(loanAmount));
         const br = dd.querySelector('[data-borrow]');
@@ -382,6 +422,6 @@ function labelState(st) {
         toSink: 'to sink', filling: 'drawing water',
         toColdPickup: 'fetching sample', toFridge: 'to fridge', storing: 'shelving sample',
         toOperate: 'to machine', operating: 'starting a run', tending: 'working the bench',
-        toRepair: 'to repair job', repairing: 'repairing', toMaintain: 'to service job', maintaining: 'servicing'
+        evacuating: 'evacuating!', evacuatingDone: 'outside', sick: 'going home sick', sickDone: 'off sick'
     })[st] || st;
 }

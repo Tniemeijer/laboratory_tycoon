@@ -133,7 +133,14 @@ html, body {
 .item .i-name { font-size: 12px; }
 .item .i-meta { font-size: 11px; color: #6b4a2a; }
 .item .i-cap { font-size: 10px; color: var(--green); }
-.item .i-desc { font-size: 9px; color: #8a6a3f; line-height: 1.2; }
+/* Cards sit in a CSS grid, so the tallest one sets the height of every card in its row — one
+   over-long description used to stretch a whole row of the Build menu. Clamp it: four lines, then
+   an ellipsis. The full text is the tooltip, so nothing is actually lost. */
+.item .i-desc {
+    font-size: 9px; color: #8a6a3f; line-height: 1.2;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4;
+    overflow: hidden;
+}
 .item.locked .i-meta { color: var(--red); }
 
 .card {
@@ -201,6 +208,27 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px; }
 .stats span { display: flex; justify-content: space-between; font-size: 10px; background: var(--panel-2); border: 2px solid var(--edge); padding: 3px 6px; }
 .stats b { color: var(--ink); }
+
+/* ---------- emergency banner ---------- */
+/* Sits under the top bar and is hidden whenever nothing is wrong, so it reads as an alarm rather
+   than as part of the furniture. Everything urgent enough to need a decision *right now* — get
+   out, call the brigade, book the crew, answer a claim — is a button in here, not buried in a
+   menu the player would have to think to open. */
+#alerts {
+    position: absolute; top: 46px; left: 50%; transform: translateX(-50%);  /* top is set from JS — see renderAlerts() */
+    display: flex; flex-direction: column; gap: 6px;
+    width: min(460px, calc(100vw - 24px)); z-index: 40;
+}
+.alert {
+    background: var(--panel); border: 3px solid var(--red);
+    box-shadow: inset 0 0 0 2px var(--edge-lite);
+    padding: 7px 9px; font-size: 11px; line-height: 1.45; color: var(--ink);
+}
+.alert.fire { animation: alertflash 0.9s steps(2, end) infinite; }
+@keyframes alertflash { 0%, 100% { border-color: var(--red); } 50% { border-color: #f0a03c; } }
+.alert b { color: var(--red); }
+.alert .row { display: flex; gap: 6px; margin-top: 6px; }
+.alert .row button { flex: 1; margin-top: 0; }
 
 /* ---------- hint + toast ---------- */
 #hint {

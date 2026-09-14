@@ -6,7 +6,8 @@
 export const CAP_LABEL = {
     prep: 'Prep', spin: 'Spin', image: 'Image', incubate: 'Incubate', analyze: 'Analyze',
     chroma: 'Chroma', weigh: 'Weigh', fluoresce: 'Fluoresce', prep_bio: 'Culture Prep', prep_chem: 'Chem Prep',
-    prep_contain: 'Contained Prep', sequence: 'Sequence', compute: 'Compute'
+    prep_contain: 'Contained Prep', incubate_contain: 'Contained Incubate',
+    image_contain: 'Contained Image', sequence: 'Sequence', compute: 'Compute'
 };
 
 // Steps that handle data and paperwork rather than living material. A sample waiting on one of
@@ -22,13 +23,13 @@ export const BUILD = {
                   timeMul: { prep: 0.9, prep_chem: 1.0 }, slots: 1, batch: 3, autoStart: true, foot: [2, 1], minLevel: 3,
                   desc: 'Automated prep — starts itself once enough samples are loaded, no scientist needed to run it. A liquid-handling deck with an XY gantry, sealed in an extracted glass enclosure, so it handles hazardous Chem Prep as well as routine prep. Rating 3.' },
     microscope: { name: 'Microscope',    cost: 1300, cat: 'Processing', caps: ['image'],
-                  timeMul: { image: 1.0, fluoresce: 1.2 }, slots: 1, attended: true, foot: [1, 1], minLevel: 1,
+                  timeMul: { image: 1.0, fluoresce: 1.2, image_contain: 1.15 }, slots: 1, attended: true, foot: [1, 1], minLevel: 1,
                   desc: 'Imaging step, one sample at a time. Someone has to sit at the eyepiece and actually read the slide, so it ties a scientist up for the whole run. Stand it inside a Dark Room and it can run fluorescence imaging too.' },
     centrifuge: { name: 'Centrifuge',    cost: 1900, cat: 'Processing', caps: ['spin'],
                   timeMul: { spin: 1.0 }, slots: 1, batch: 4, foot: [1, 1], minLevel: 2,
                   desc: 'Spin step. A real rotor — holds 4 samples per run. Needs Lab Rating 2.' },
     incubator:  { name: 'Incubator',     cost: 2400, cat: 'Processing', caps: ['incubate'],
-                  timeMul: { incubate: 1.0 }, slots: 4, foot: [1, 2], minLevel: 2,
+                  timeMul: { incubate: 1.0, incubate_contain: 1.1 }, slots: 4, foot: [1, 2], minLevel: 2,
                   desc: 'Incubation step. Multiple shelves — up to 4 techs can load it at once. Rating 2.' },
     sequencer:  { name: 'DNA Sequencer', cost: 9500, cat: 'Processing', caps: ['sequence'],
                   timeMul: { sequence: 1.0 }, slots: 1, batch: 4, foot: [2, 2], minLevel: 4,
@@ -39,9 +40,6 @@ export const BUILD = {
     serverrack: { name: 'Server Rack',   cost: 3800, cat: 'Processing', caps: ['compute'],
                   timeMul: { compute: 1.0 }, slots: 1, batch: 4, autoStart: true, autoFeed: true, foot: [1, 1], minLevel: 4,
                   desc: 'Crunches raw sequencer output into something a human can read. Reads travel over the network, so nobody carries anything and nobody starts it — samples land here on their own. 4 at a time. Rating 4.' },
-    analyzer:   { name: 'Auto-Analyzer', cost: 4000, cat: 'Processing', caps: ['analyze'],
-                  timeMul: { analyze: 0.7 }, slots: 1, batch: 2, foot: [2, 2], minLevel: 3,
-                  desc: 'Fast, dedicated analysis. Runs 2 samples per batch. Rating 3.' },
     scale:      { name: 'Scale',         cost: 420,  cat: 'Processing', caps: ['weigh'],
                   timeMul: { weigh: 1.0 }, slots: 1, batch: 3, foot: [1, 1], minLevel: 1,
                   desc: 'Precision balance for dosing and QC mass checks. Works anywhere on the floor. Quick — holds up to 3 samples per run.' },
@@ -54,8 +52,8 @@ export const BUILD = {
     fumehood:   { name: 'Fume Hood',     cost: 750,  cat: 'Processing', caps: ['prep_chem'],
                   timeMul: { prep_chem: 1.0 }, slots: 1, batch: 3, attended: true, foot: [1, 1], minLevel: 1,
                   desc: "Ventilated cabinet for prep with toxic, acidic or caustic chemicals — a regular bench won't do. Prep only, and a scientist stays for the whole run." },
-    darkroom:   { name: 'Dark Room',     cost: 1500, cat: 'Utility', kind: 'dark', room: true, foot: [2, 2], minLevel: 3,
-                  desc: "A 2×2 light-sealed room — floor you build on, not furniture. A Microscope standing inside also runs fluorescence imaging. Lay another flush alongside to grow the room. Rating 3." },
+    darkroom:   { name: 'Dark Room',     cost: 420,  cat: 'Utility', kind: 'dark', room: true, foot: [1, 1], minLevel: 3,
+                  desc: "Light-sealed floor, laid one tile at a time into any shape — tiles laid flush merge into one room, and it goes down over machines you already own. A Microscope standing on it also runs fluorescence imaging. Finish it with a Door or nobody can get in. Rating 3." },
     fridge:     { name: 'Fridge',        cost: 850,  cat: 'Storage', kind: 'cold', slots: 4, foot: [1, 1], minLevel: 1,
                   desc: 'Cold storage for perishable samples — 4 shelves, several staff can use it at once.' },
     freezer:    { name: 'Freezer',       cost: 2400, cat: 'Storage', kind: 'cold', slots: 6, foot: [1, 2], minLevel: 2,
@@ -64,10 +62,16 @@ export const BUILD = {
                   desc: 'Cleaners restock here and mop ~40% faster nearby.' },
     sink:       { name: 'Sink',          cost: 700,  cat: 'Utility', kind: 'water', slots: 1, foot: [1, 1], minLevel: 1,
                   desc: 'Distilled/demineralized water for reagent prep, and glassware washing — mop ~40% faster nearby.' },
-    containment: { name: 'Containment Lab', cost: 1900, cat: 'Utility', kind: 'contain', room: true, foot: [2, 2], minLevel: 2,
-                  desc: "A 2×2 sealed, negative-pressure room for work with biological and genetically modified agents. A Flow Hood standing inside one handles contained work that can't be done on the open floor. Lay another flush alongside to grow it. Rating 2." },
-    cleanroom:  { name: 'Cleanroom',     cost: 2400, cat: 'Utility', kind: 'sterile', room: true, foot: [2, 2], minLevel: 4,
-                  desc: "A 2×2 sealed, filtered room — floor you build on. A Chromatograph only runs pharma-grade work while standing inside one. Also cuts contamination risk lab-wide. Lay another flush alongside to grow it. Rating 4." }
+    containment: { name: 'Containment Lab', cost: 520, cat: 'Utility', kind: 'contain', room: true, foot: [1, 1], minLevel: 2,
+                  desc: "Sealed, negative-pressure floor, laid one tile at a time. A Flow Hood, Incubator and Microscope standing on it gain contained Prep, Incubate and Image — the whole Virus and Pathogen chain. Needs an Airlock. Rating 2." },
+    cleanroom:  { name: 'Cleanroom',     cost: 650,  cat: 'Utility', kind: 'sterile', room: true, foot: [1, 1], minLevel: 4,
+                  desc: "Sealed, filtered floor, laid one tile at a time. A Chromatograph only runs pharma-grade Chroma while standing on it. Needs an Airlock — a plain door would let the filtered air straight out. Rating 4." },
+    door:       { name: 'Door',          cost: 180,  cat: 'Utility', door: 'door', foot: [1, 1], minLevel: 3,
+                  desc: "A way into a room. Goes on one of the room's own edge tiles and opens whichever way it faces, so rotate it to point outward before placing. Costs no floor space. Enough for a Dark Room." },
+    firealarm:  { name: 'Fire Alarm',    cost: 600,  cat: 'Utility', mount: true, foot: [1, 1], minLevel: 1,
+                  desc: "Wall-mounted sounder. Evacuates the lab and calls the brigade by itself — if you keep it serviced." },
+    airlock:    { name: 'Airlock',       cost: 520,  cat: 'Utility', door: 'airlock', foot: [1, 1], minLevel: 2,
+                  desc: "A double-door vestibule, so the room never loses its air. Placed like a Door — on an edge tile, facing out. Cleanrooms and Containment Labs take nothing less, and staff gown up passing through." }
 };
 
 // Raw materials — shelf-stable, bought in bulk, converted into reagents at a bench.
@@ -171,11 +175,73 @@ export const COND_SLOW_THRESHOLD = 70;
 export const COND_SLOW_MAX = 0.6;          // up to +60% run time at 0 condition
 export const COND_BREAKDOWN_THRESHOLD = 40;
 export const COND_BREAKDOWN_CHANCE_MAX = 0.25;
-export const MECH_MAINT_THRESHOLD = 80;    // a mechanic proactively services anything below this
-export const MECH_MAINT_TIME = 6;
+// Nobody on the payroll touches a wrench: maintenance is a trade you call in. Book a mechanic and
+// they turn up the following morning and work through everything outstanding in one visit. The
+// call-out fee is charged per visit and the rest per machine, so there's a real pull between
+// calling them the moment something breaks and holding off to get the whole list done in one go
+// — while every machine still on that list sits idle or limping.
+export const MECH_MAINT_THRESHOLD = 80;    // anything below this is worth servicing while they're in
 export const MECH_MAINT_GAIN = 35;
-export const MECH_REPAIR_TIME = 10;
-export const MECH_REPAIR_COST = 45;
+export const MECH_CALLOUT_FEE = 200;       // per visit, whatever they end up doing
+export const MECH_REPAIR_COST = 120;       // per machine actually broken
+export const MECH_SERVICE_COST = 40;       // per worn machine serviced
+// They don't teleport: the mechanic lets themselves in at the front door on the morning of the
+// visit and works down the list machine by machine, in view, before leaving again.
+export const MECH_REPAIR_TIME = 7;         // seconds spent at a machine that's actually broken
+export const MECH_SERVICE_TIME = 4;        // …and at one that only needs servicing
+
+// ---------- accidents ----------
+// Wear doesn't just slow a machine down and eventually stop it: a badly-neglected one can go up.
+// The check rides on the same completed-run event as the breakdown roll, so a machine you never
+// service but never use is never a hazard — it's work on knackered equipment that starts fires.
+export const FIRE_COND_THRESHOLD = 45;     // below this, a finished run can set the machine alight
+export const FIRE_CHANCE_MAX = 0.10;       // at 0 condition
+export const FIRE_SPREAD_RADIUS = 2;       // tiles — a fire reaches anything within this of it
+export const FIRE_SPREAD_INTERVAL = 5;     // seconds between spread rolls
+export const FIRE_SPREAD_CHANCE = 0.3;
+export const FIRE_DESTROY_TIME = 45;       // seconds alight before the machine is a write-off
+export const FIRE_BRIGADE_ETA = 20;        // seconds from the call to the engine pulling up outside
+export const FIRE_CREW_SIZE = 2;           // …and how many come through the door when it does
+export const FIRE_FIGHT_TIME = 4;          // seconds on one machine before it's out
+export const FIRE_BRIGADE_FEE = 900;
+export const FIRE_HURT_RADIUS = 1.5;       // world units from the flames that counts as "too close"
+export const FIRE_HURT_TIME = 7;           // seconds in them before it turns lethal
+export const FIRE_DEATH_CHANCE = 0.55;     // rolled once when that timer runs out
+export const FIRE_REP_PENALTY = 25;
+// How likely an alarm is to actually go off, by condition: useless when it's never been looked at,
+// near-certain when it's freshly serviced. Same maintenance loop as everything else.
+// An alarm never "runs", so run-wear can't touch it — it just quietly rots on the wall instead,
+// which is what makes forgetting about it the trap rather than a one-off purchase decision.
+export const ALARM_DECAY_PER_DAY = 4;
+export const ALARM_MIN_RELIABILITY = 0.25;
+export const ALARM_MAX_RELIABILITY = 0.98;
+export const EVAC_SPEED_MUL = 1.7;         // people move rather faster on the way out
+
+// ---------- outbreak ----------
+// The containment equivalent of a fire: neglected kit inside a Containment Lab can let something
+// out. The room is then sealed until a disinfection crew has been through, and anyone who was in
+// there when it happened may well have picked it up.
+export const OUTBREAK_COND_THRESHOLD = 55;
+export const OUTBREAK_CHANCE_MAX = 0.09;
+export const OUTBREAK_INFECT_CHANCE = 0.45;
+export const ILLNESS_DAYS = 3;             // days off sick before they're back on the floor
+export const DISINFECT_FEE = 1400;
+export const DISINFECT_CREW_SIZE = 2;
+export const DISINFECT_TIME = 14;          // seconds of fogging before the room reopens
+export const OUTBREAK_REP_PENALTY = 45;
+
+// ---------- lawsuits ----------
+// Killing someone is not a fine, it's a claim: it lands the next morning and sits there until you
+// deal with it. Settling is the cheap, certain option; fighting is a coin-flip that's either much
+// cheaper or much worse, and doing nothing at all means it goes to court without you.
+export const LAWSUIT_BASE = 6000;
+export const LAWSUIT_VAR = 5000;
+export const LAWSUIT_DAYS = 4;             // days to respond before it goes to court by default
+export const LAWSUIT_SETTLE_FACTOR = 0.6;
+export const LAWSUIT_WIN_CHANCE = 0.35;
+export const LAWSUIT_LEGAL_FEE = 800;      // what fighting costs win or lose
+export const LAWSUIT_LOSS_MULT = 1.35;     // and what it costs on top of the claim if you lose
+export const DEATH_REP_PENALTY = 130;
 
 // Rooms only ever ADD to a machine, never gate it: every machine does its own job perfectly well
 // standing on the open floor, and a room grants whatever extra a controlled environment buys you
@@ -186,18 +252,33 @@ export const MECH_REPAIR_COST = 45;
 export const ROOM_BONUS_CAP = {
     dark:    { microscope: 'fluoresce' },
     sterile: { chromatograph: 'chroma' },
-    contain: { flowhood: 'prep_contain' }
+    // Contained work never leaves the room once it's started: the agent goes from the hood into
+    // the incubator and under the scope without crossing the open floor, so the incubator and
+    // microscope each need their own contained capability too. Only taking the sample in and
+    // writing the result up happen outside.
+    contain: { flowhood: 'prep_contain', incubator: 'incubate_contain', microscope: 'image_contain' }
 };
 // On top of any cap it grants, working inside a room is simply better-controlled work: every run
 // on a machine standing in one comes out a little cleaner. This is the "compliance" half of what
 // a room buys you, and it applies to every kind.
 export const ROOM_QUALITY_BONUS = 1.05;
+// What each kind of room will accept as a way in. A Dark Room just needs a doorway; anything that
+// has to hold an atmosphere — sterile air in, contained air off the corridor — needs the double
+// doors of an airlock, which is also where staff gown up.
+export const ROOM_DOOR_REQ = { dark: 'door', sterile: 'airlock', contain: 'airlock' };
+// Rooms whose air is worth gowning up for: staff show up in protective kit while inside one.
+export const SUITED_ROOM_KINDS = ['sterile', 'contain'];
 
 // Per-scientist skill growth: whoever actually walks up and starts a run gets credit for it —
 // each completed run raises that worker's skill at that specific task (cap), a little faster with
 // bigger batches, cutting run time and nudging quality up the more experience they build there.
 // Automated equipment (autoStart, e.g. the Prep Robot) never grants XP — nobody actually did the
 // work — and only the operating worker is credited, not everyone idle nearby.
+// Some caps aren't a craft of their own — running a centrifuge is the same hands-and-labels work
+// as prep, so it trains and draws on that skill rather than a separate one nobody would ever
+// specialise in. Anything not listed here trains its own cap.
+export const SKILL_CAP_ALIAS = { spin: 'prep', prep_contain: 'prep', prep_bio: 'prep', prep_chem: 'prep',
+                                 incubate_contain: 'incubate', image_contain: 'image', fluoresce: 'image' };
 export const SKILL_XP_PER_RUN = 10;
 export const SKILL_XP_PER_EXTRA_SAMPLE = 2;
 export const SKILL_XP_PER_LEVEL = 60;
@@ -224,7 +305,7 @@ export const PROTOCOLS = {
     // Live viral agents are containment work: a Flow Hood on the open floor handles plain culture
     // fine, but this asks for one standing inside a Containment Lab.
     virus:  { name: 'Virus',    minLevel: 3, steps: [
-                { cap: 'prep_contain', t: 6 }, { cap: 'incubate', t: 12 }, { cap: 'analyze', t: 6 } ] },
+                { cap: 'prep_contain', t: 6 }, { cap: 'incubate_contain', t: 12 }, { cap: 'analyze', t: 6 } ] },
     dna:    { name: 'DNA',      minLevel: 3, steps: [
                 { cap: 'prep', t: 7, reagent: 'buffer' }, { cap: 'spin', t: 5 },
                 { cap: 'image', t: 6 }, { cap: 'analyze', t: 5 } ] },
@@ -246,8 +327,8 @@ export const PROTOCOLS = {
     // Same gate-by-capability story as Pharma: 'prep_contain' simply doesn't exist in a lab until
     // a Flow Hood is standing in a Containment Lab, so this can't be worked before one is up.
     pathogen: { name: 'Pathogen', minLevel: 4, steps: [
-                { cap: 'prep_contain', t: 7 }, { cap: 'incubate', t: 12 },
-                { cap: 'image', t: 6 }, { cap: 'analyze', t: 7 } ] }
+                { cap: 'prep_contain', t: 7 }, { cap: 'incubate_contain', t: 12 },
+                { cap: 'image_contain', t: 6 }, { cap: 'analyze', t: 7 } ] }
 };
 
 export const UPGRADES = {

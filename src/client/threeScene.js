@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { BUILD, ZONES, PROTOCOLS, COND_BREAKDOWN_THRESHOLD } from './data.js';
+import { BUILD, ZONES, PROTOCOLS, COND_SLOW_THRESHOLD, SUITED_ROOM_KINDS } from './data.js';
 import {
-    GRID, BUILD_MAX_Z, BREAK_ROOM_MAX, breakRoom, breakRoomProps, roomAreas, roomDoorways,
-    tileToWorld, footTiles, zoneAt, gateXRange
+    GRID, BUILD_MAX_Z, BREAK_ROOM_MAX, breakRoom, breakRoomProps, roomAreas, roomDoorways, breakRoomDoorway,
+    tileToWorld, footTiles, zoneAt, gateXRange, isShellWall
 } from './grid.js';
 
 const HALF = GRID / 2;
@@ -38,8 +38,8 @@ function sampleAppearance(sm) {
 // The mop closet stays warm/wood-toned since it's furniture, not clinical equipment.
 const EQUIP_COLOR = {
     bench: 0xc4cdd2, preprobot: 0x4a5560, microscope: 0x585e63, centrifuge: 0xe8ebed, incubator: 0xd6dadd,
-    analyzer: 0xdfe3e5, fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3,
-    scale: 0xe8ebed, chromatograph: 0xdfe3e5, sequencer: 0xe4e9ec, serverrack: 0x3a4046, analysisdesk: 0xd8dde1, darkroom: 0x2a2e33, cleanroom: 0xeef3f4,
+    fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3,
+    scale: 0xe8ebed, chromatograph: 0xdfe3e5, sequencer: 0xe4e9ec, door: 0xb8c2c6, airlock: 0xcfd8dd, serverrack: 0x3a4046, analysisdesk: 0xd8dde1, darkroom: 0x2a2e33, cleanroom: 0xeef3f4, firealarm: 0xb9c1c6,
     flowhood: 0xe8ebed, fumehood: 0xc9ced3
 };
 
@@ -68,14 +68,18 @@ const TRAY_Y = { centrifuge: 0.68 };
 // sync(); zero always means shut.
 const HINGE_OPEN = { centrifuge: -Math.PI / 2, cold: -1.15 };   // the lid stops bolt upright, never past it
 const HINGE_SPEED = 6;
+// How dark a machine gets at zero condition — dull and grimy, still readable as itself.
+const SHADE_MIN = 0.5;
 const DIR4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+const EMPTY_SET = new Set();
 const DOOR_PREF = [[0, 1], [1, 0], [-1, 0], [0, -1]];   // south first — that's where the floor traffic is
 
 // Height to float each type's progress bar at, clear of its own model.
 const BAR_Y = {
-    bench: 0.85, preprobot: 1.62, microscope: 1.3, centrifuge: 0.95, incubator: 1.45, analyzer: 1.25,
+    bench: 0.85, preprobot: 1.62, microscope: 1.3, centrifuge: 0.95, incubator: 1.45,
     fridge: 1.5, freezer: 1.65, sink: 0.8, mopcloset: 1.45,
-    scale: 0.75, chromatograph: 1.35, sequencer: 1.95, serverrack: 1.6, analysisdesk: 1.15, flowhood: 1.35, fumehood: 1.55
+    scale: 0.75, chromatograph: 1.35, sequencer: 1.95, serverrack: 1.6, analysisdesk: 1.15, flowhood: 1.35, fumehood: 1.55,
+    firealarm: 1.75, door: 1.1, airlock: 1.1
 };
 
 function lmat(c, e = {}) { return new THREE.MeshLambertMaterial({ color: c, ...e }); }
@@ -89,6 +93,15 @@ function cyl(rt, rb, h, s, c, e) { return new THREE.Mesh(new THREE.CylinderGeome
 // whichever capability happened to be checked/unchecked most recently read as arbitrary and kept
 // changing underfoot. The mop swing already shows who's actually cleaning right now.
 const COAT_COLOR = 0xf2f4f7;
+// Gowned up: staff working inside a Cleanroom or Containment Lab wear protective kit instead of a
+// labcoat, hood and all. They change in the airlock on the way through, so the swap happens
+// exactly where you'd expect to see it.
+const SUIT_COLOR = 0xf0d878, SUIT_HOOD = 0xe8c84a;
+// Contractors, not staff — each trade its own unmistakable silhouette and palette, so you can
+// tell at a glance who has turned up without clicking anything.
+const VISITOR_COAT = 0xe07a2f, VISITOR_HAT = 0xe8ebed;          // mechanic: hi-vis, white hard hat
+const FIRE_COAT = 0x2b3442, FIRE_BAND = 0xf5e14a, FIRE_HAT = 0xe8b21f;   // turnout kit, yellow helmet
+const CLEAN_SUIT = 0xf2f6f4, CLEAN_TRIM = 0x4fae7a, CLEAN_VISOR = 0x2b3d4a;
 
 // dims of a footprint after rotation
 function footDims(type, rot) {
@@ -109,6 +122,7 @@ class LabScene {
         this.equipMeshes = new Map();
         this.sampleMeshes = new Map();
         this.staffMeshes = new Map();
+        this.visitorMeshes = new Map();
         this.dirtMeshes = new Map();
         this.zoneFences = new Map();
         this._zonesKey = null;
@@ -256,21 +270,11 @@ class LabScene {
         // the entrance opening here MUST match grid.js's corridor width exactly (gateXRange), not
         // just the two literal gate-post columns — otherwise a nav-walkable corridor tile ends up
         // sitting right behind a rendered wall with nothing stopping a worker from walking through it.
-        const [gateLo, gateHi] = gateXRange();
-        const inAnnex = (nx, nz) => nx >= BREAK_ROOM_MAX.x0 && nx < BREAK_ROOM_MAX.x0 + BREAK_ROOM_MAX.w &&
-                                    nz >= BREAK_ROOM_MAX.z0 && nz < BREAK_ROOM_MAX.z0 + BREAK_ROOM_MAX.h;
-        const isWall = (nx, nz) => {
-            if (nx < 0 || nx >= GRID || nz < 0) return true;
-            // The break room is an annex built onto the side of the building, so the shell doesn't
-            // close across where the two meet — its own partition wall (with the doorway in it)
-            // is the boundary there. Without this the shell sealed the annex off completely and
-            // staff appeared to walk through solid wall to get to the coffee, since the shell is
-            // decoration that the nav grid knows nothing about.
-            if (inAnnex(nx, nz)) return false;
-            if (nz === BUILD_MAX_Z + 1) return nx < gateLo || nx > gateHi;   // entrance row: open for the gate room's width
-            if (nz > BUILD_MAX_Z + 1) return false;
-            return !zoneAt(nx, nz);
-        };
+        // The predicate lives in grid.js, not here: placement of wall-mounted fittings reads the
+        // same function to decide where there's a wall to hang on, and two copies of "where is
+        // there a wall" would drift the moment either changed — which is exactly how fittings
+        // ended up hanging in mid-air over an unbought wing, a boundary that has no wall at all.
+        const isWall = isShellWall;
         for (let tz = 0; tz <= BUILD_MAX_Z; tz++) {
             for (let tx = 0; tx < GRID; tx++) {
                 if (!zoneAt(tx, tz)) continue;
@@ -359,7 +363,8 @@ class LabScene {
     _updateFloor(state) {
         const zonesKey = state.ownedZones.slice().sort().join(',');
         const roomsKey = state.equipment.filter(e => BUILD[e.type].room)
-            .map(e => `${e.type}@${e.tx},${e.tz}`).sort().join('|') + '#' + breakRoom(state).level;
+            .map(e => `${e.type}@${e.tx},${e.tz}`).sort().join('|') + '#' + breakRoom(state).level
+            + '#' + (state.outbreak ? state.outbreak.tiles.join(';') : '');
         if (zonesKey === this._zonesKey && roomsKey === this._roomsKey) return;
         this._zonesKey = zonesKey; this._roomsKey = roomsKey;
 
@@ -371,6 +376,7 @@ class LabScene {
         // stand exactly where staff are actually stopped — including the break room, which is just
         // another walled area as far as this is concerned.
         const areas = roomAreas(state);
+        const sealed = new Set(state.outbreak ? state.outbreak.tiles : []);
         const roomKind = new Map();
         for (const [kind, tiles] of areas) for (const key of tiles) roomKind.set(key, kind);
         for (const t of this.floorTiles) {
@@ -379,7 +385,11 @@ class LabScene {
             if (u.annex) t.visible = !!style;        // annex ground only exists once it's walled in
 
             const unowned = u.zoneId && !state.ownedZones.includes(u.zoneId);
-            const col = style ? (u.light ? style.light : style.dark)
+            // A sealed containment room goes sickly yellow-green: the room is still there, still
+            // full of your equipment, and you still can't go in it.
+            const quarantined = sealed.has(`${u.tx},${u.tz}`);
+            const col = quarantined ? (u.light ? 0xcfc23c : 0xb2a52b)
+                : style ? (u.light ? style.light : style.dark)
                 : unowned ? (u.light ? 0x9fae86 : 0x8fa078)
                 : u.baseCol;
             t.material.color.setHex(col);
@@ -402,7 +412,7 @@ class LabScene {
         const H = 0.85;
         for (const [kind, tiles] of areas) {
             const style = ROOM_STYLE[kind] || ROOM_STYLE.sterile;
-            const doors = roomDoorways(state, tiles);
+            const doors = kind === 'break' ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
             for (const key of tiles) {
                 const [tx, tz] = key.split(',').map(Number);
                 const w = tileToWorld(tx, tz);
@@ -699,15 +709,51 @@ class LabScene {
         // the height to anchor it at.
         g.userData.barY = BAR_Y[e.type] || 1.4;
 
-        // Reliability light — hidden while a machine's in good shape, amber once it's worn
-        // enough to risk breaking, blinking red once it actually has (see sync() below). Sits
-        // just above the progress bar rather than replacing it, since a machine can be both
-        // mid-run and showing amber at the same time.
-        const warnLight = box(0.16, 0.16, 0.16, 0xf0a03c);
-        warnLight.position.set(0, (BAR_Y[e.type] || 1.4) + 0.22, 0);
-        warnLight.visible = false;
-        g.add(warnLight);
-        g.userData.warnLight = warnLight;
+        // Condition is shown on the machine itself rather than by a coloured block floating over
+        // it: as it wears, its own colours darken and dull (see applyCondition() below), the way
+        // a neglected machine actually looks. That reads at a glance across the whole floor
+        // without adding anything to the scene, and it scales — you can see the difference
+        // between "a bit tired" and "about to go" instead of a light that's either on or off.
+        //
+        // Broken is the one state that isn't a matter of degree, so it gets a mark rather than a
+        // shade: a red cross over the machine, billboarded in sync() so it's square-on from all
+        // four camera angles.
+        const cross = new THREE.Group();
+        for (const sign of [1, -1]) {
+            const bar = box(0.52, 0.13, 0.05, 0xd8342a);
+            bar.rotation.z = sign * Math.PI / 4;
+            cross.add(bar);
+        }
+        cross.position.set(0, (BAR_Y[e.type] || 1.4) + 0.26, 0);
+        cross.visible = false;
+        g.add(cross);
+        g.userData.cross = cross;
+
+        // Flames. Built for every machine up front and simply hidden rather than spawned when a
+        // fire starts — a fire is a fact about the machine, not an entity of its own, so this
+        // keeps it out of the reconcile bookkeeping entirely. Cones scattered over the footprint,
+        // flickering in sync() so it reads as burning rather than as an orange hat.
+        const fire = new THREE.Group();
+        fire.visible = false;
+        const spread = [[0, 0, 1], [0.3, 0.22, 0.7], [-0.28, -0.2, 0.75], [0.24, -0.26, 0.6], [-0.3, 0.26, 0.65]];
+        for (const [ox, oz, sc] of spread) {
+            const outerGeo = new THREE.ConeGeometry(0.22 * sc, 0.72 * sc, 6);
+            outerGeo.translate(0, 0.36 * sc, 0);
+            const outer = new THREE.Mesh(outerGeo, lmat(0xf2761f, { transparent: true, opacity: 0.85 }));
+            outer.position.set(ox * fw, 0.55, oz * fh);
+            outer.userData.flick = 0.8 + Math.random() * 0.6;
+            fire.add(outer);
+            const innerGeo = new THREE.ConeGeometry(0.11 * sc, 0.42 * sc, 6);
+            innerGeo.translate(0, 0.21 * sc, 0);
+            const inner = new THREE.Mesh(innerGeo, lmat(0xffd24a, { transparent: true, opacity: 0.95 }));
+            inner.position.set(ox * fw, 0.6, oz * fh);
+            inner.userData.flick = 1.1 + Math.random() * 0.7;
+            fire.add(inner);
+        }
+        const smoke = box(fw * 0.8, 0.5, fh * 0.8, 0x3a3f45, { transparent: true, opacity: 0.3 });
+        smoke.position.y = 1.6; smoke.userData.flick = 0.35; fire.add(smoke);
+        g.add(fire);
+        g.userData.fire = fire;
 
         if (e.type === 'bench') {
             const top = box(0.85, 0.16, 0.85, col); top.position.y = 0.52; g.add(top);
@@ -917,91 +963,55 @@ class LabScene {
             const keys = box(0.34, 0.03, 0.14, 0xdfe3e5); keys.position.set(-0.08, 0.55, 0.06); g.add(keys);
             const paper = box(0.18, 0.012, 0.22, 0xf4ede0); paper.position.set(0.3, 0.55, 0.02); g.add(paper);
             const mug = cyl(0.05, 0.05, 0.1, 8, 0xd88a5a); mug.position.set(0.34, 0.59, -0.2); g.add(mug);
-        } else if (e.type === 'analyzer') {
-            // cabFace used to be computed from fh/2 (half the whole footprint) instead of the
-            // cabinet box's own half-depth (fh-0.2)/2 — it landed the screen and its status glow
-            // *inside* the solid cabinet, fully hidden behind its own front face rather than on it.
-            const cab = box(fw - 0.2, 1.0, fh - 0.2, col); cab.position.y = 0.57; g.add(cab);
-            const cabFace = (fh - 0.2) / 2;
-            const scr = box(fw * 0.5, 0.42, 0.06, 0x11333a); scr.position.set(0, 0.7, cabFace + 0.04); g.add(scr);
-            const glow = box(fw * 0.42, 0.3, 0.02, 0x35d0ff, { transparent: true, opacity: 0.85 });
-            glow.position.set(0, 0.7, cabFace + 0.11); glow.userData.spin = true; g.add(glow);
-        } else if (e.type === 'fridge' || e.type === 'freezer') {
-            // The cabinet stops short of the door, leaving a shallow recess with lit shelves and
-            // vials in it. A solid block would have shown a blank wall behind the open door —
-            // there has to be somewhere for the door to reveal.
-            const bodyH = 1.3 + (fh - 1) * 0.15;
-            const zDoor = fh / 2 - 0.14, RECESS = 0.18;
-            const back = -(fh / 2 - 0.1), front = zDoor - RECESS;
-            const body = box(fw - 0.2, bodyH, front - back, col);
-            body.position.set(0, bodyH / 2, (front + back) / 2); g.add(body);
-            // Everything in the recess is kept inside the area the shut door covers, or you'd see
-            // shelves poking out around its edges with the fridge closed.
-            const dwF = fw - 0.34, doorH = bodyH - 0.4;
-            const inW = dwF - 0.08, inTop = bodyH / 2 + doorH / 2 - 0.05, inBot = bodyH / 2 - doorH / 2 + 0.05;
-            const inner = box(inW, inTop - inBot, 0.03, e.type === 'freezer' ? 0xbfe0ef : 0xe8f1f5);
-            inner.position.set(0, (inTop + inBot) / 2, front + 0.02); g.add(inner);
-            const chill = box(inW - 0.05, inTop - inBot - 0.05, 0.02, e.type === 'freezer' ? 0x8fd3f0 : 0xcfe8f2, { transparent: true, opacity: 0.45 });
-            chill.position.set(0, (inTop + inBot) / 2, front + 0.05); g.add(chill);
-            // Frame around the opening. The recess is a full-width gap in the front of the
-            // cabinet, so with the door shut you could still see into it over the door's top edge
-            // from this camera angle — these panels close everything except the doorway itself.
-            const frameW = (fw - 0.2 - dwF) / 2, zMid = (front + zDoor) / 2;
-            const lintelH = bodyH - (bodyH / 2 + doorH / 2);
-            if (lintelH > 0.01) { const m = box(fw - 0.2, lintelH, RECESS, col); m.position.set(0, bodyH - lintelH / 2, zMid); g.add(m); }
-            const sillH = bodyH / 2 - doorH / 2;
-            if (sillH > 0.01) { const m = box(fw - 0.2, sillH, RECESS, col); m.position.set(0, sillH / 2, zMid); g.add(m); }
-            if (frameW > 0.01) for (const sx of [-1, 1]) {
-                const m = box(frameW, doorH, RECESS, col);
-                m.position.set(sx * (dwF + frameW) / 2, bodyH / 2, zMid); g.add(m);
+        } else if (e.type === 'door' || e.type === 'airlock') {
+            // Stands in the wall line on the side it faces, so it reads as a gap in the partition
+            // rather than a cupboard in the middle of the floor. An airlock is two leaves with a
+            // lit vestibule between them — that's where staff gown up on the way through.
+            const twin = e.type === 'airlock';
+            const H = 0.9, zFace = 0.44;
+            for (const sx of [-1, 1]) {
+                const post = box(0.09, H + 0.08, 0.16, 0x8a9196);
+                post.position.set(sx * 0.45, (H + 0.08) / 2, zFace); g.add(post);
             }
-            const VIAL = [0xe0555f, 0x77c97b, 0x5b8de8, 0xf1d34a];
-            for (let i = 0; i < 3; i++) {
-                const y = inBot + 0.08 + i * (inTop - inBot - 0.2) / 2;
-                const shelf = box(inW - 0.04, 0.03, RECESS - 0.06, 0x9aa2a8);
-                shelf.position.set(0, y, front + RECESS / 2); g.add(shelf);
-                for (let k = 0; k < 3; k++) {
-                    const vial = box(0.06, 0.12, 0.06, VIAL[(i * 3 + k) % VIAL.length]);
-                    vial.position.set(-(inW - 0.16) / 2 + k * (inW - 0.16) / 2, y + 0.075, front + RECESS / 2); g.add(vial);
-                }
+            const head = box(1.02, 0.12, 0.18, 0x8a9196); head.position.set(0, H + 0.06, zFace); g.add(head);
+            const leaf = (z) => {
+                const l = box(0.78, H - 0.06, 0.05, col, { transparent: true, opacity: 0.55 });
+                l.position.set(0, (H - 0.06) / 2, z); g.add(l);
+                const bar = box(0.06, 0.26, 0.04, 0x6b7075); bar.position.set(0.28, 0.46, z + 0.04); g.add(bar);
+            };
+            leaf(zFace);
+            if (twin) {
+                leaf(zFace - 0.42);
+                const vest = box(0.9, 0.03, 0.4, 0x8be0c0, { transparent: true, opacity: 0.4 });
+                vest.position.set(0, 0.02, zFace - 0.21); g.add(vest);
+                const lamp = box(0.1, 0.06, 0.06, 0x54d67a, { transparent: true, opacity: 0.9 });
+                lamp.position.set(0, H + 0.02, zFace - 0.21); lamp.userData.spin = true; g.add(lamp);
             }
-            // The door hangs off a hinge post down its left edge so it swings out of the way while
-            // a scientist is actually shelving something, instead of being a painted-on panel.
-            const dw = fw - 0.34;
-            const hinge = new THREE.Group();
-            hinge.position.set(-dw / 2, body.position.y, fh / 2 - 0.14);
-            hinge.userData.hingeAxis = 'y';
-            hinge.userData.hingeOpen = HINGE_OPEN.cold;
-            hinge.userData.hingeTarget = 0;                  // starts shut
-            g.add(hinge); g.userData.hinge = hinge;
-            const door = box(dw, bodyH - 0.4, 0.06, 0xffffff); door.position.set(dw / 2, 0, 0); hinge.add(door);
-            const h2 = box(0.06, 0.34, 0.06, 0x8a9196); h2.position.set(dw - 0.07, 0, 0.04); hinge.add(h2);
-            const fr = box(0.5, 0.12, 0.05, e.type === 'freezer' ? 0x2fa8d8 : 0x9fd6e6);
-            fr.position.set(dw / 2, bodyH - 0.2 - body.position.y, 0); hinge.add(fr);
-        } else if (e.type === 'mopcloset') {
-            // Broom and bucket used to sit far enough forward (and the tilted broom's swing far
-            // enough) that both poked out through the closet's own front face instead of reading
-            // as "propped in front of it". Body is a touch shallower and both props sit clearly
-            // forward of its face now, with an unambiguous gap instead of a clipped seam.
-            const body = box(0.68, 1.2, 0.58, col); body.position.y = 0.66; g.add(body);   // half-depth 0.29
-            const handle = box(0.045, 0.82, 0.045, 0x6b4a2a); handle.position.set(0.2, 0.85, 0.42); handle.rotation.x = -0.12; g.add(handle);
-            const bucket = cyl(0.15, 0.13, 0.19, 8, 0xf0c040); bucket.position.set(-0.2, 0.235, 0.46); g.add(bucket);
-        } else if (e.type === 'sink') {
-            // The basin used to sit at the same height as the counter (top faces exactly
-            // coincident, overlapping footprints) — a textbook top-down z-fight. It's now
-            // properly recessed below the counter surface, like a real inset basin, with a
-            // visible rim gap instead of a shared plane.
-            const counterTop = 0.55;
-            const counter = box(0.85, 0.1, 0.6, 0xd8dde1); counter.position.y = counterTop - 0.05; g.add(counter);
-            for (const [x, z] of [[.36, .24], [-.36, .24], [.36, -.24], [-.36, -.24]]) {
-                const l = box(0.07, 0.46, 0.07, 0x8a9196); l.position.set(x, 0.24, z); g.add(l);
-            }
-            const basinTop = counterTop - 0.09;
-            const basin = box(0.55, 0.12, 0.36, col); basin.position.y = basinTop - 0.06; g.add(basin);
-            const faucet = box(0.06, 0.32, 0.06, 0x9aa2a8); faucet.position.set(0, 0.7, -0.22); g.add(faucet);
-            const spout = box(0.06, 0.06, 0.2, 0x9aa2a8); spout.position.set(0, 0.85, -0.13); g.add(spout);
-            const drip = box(0.05, 0.05, 0.05, 0x8be0f0, { transparent: true, opacity: 0.85 });
-            drip.position.set(0, basinTop + 0.02, -0.05); g.add(drip);
+        } else if (e.type === 'firealarm') {
+            // A round grey sounder bolted flat to the wall, not a box standing on the floor. Its
+            // backplate lands exactly on the wall's inner face (the shell slab spans 0.34–0.66
+            // from the tile centre) with the bell standing proud of it into the room — buried any
+            // deeper and it vanishes into the wall from inside; any shallower and it floats.
+            // Which wall it's on isn't the player's to get wrong either: grid.wallFacing() snaps
+            // the rotation at placement time, so there is always a drawn wall right behind it.
+            //
+            // It sits at cornice height — 1.39–1.71 against a 1.60 wall with an 0.18 trim on top
+            // — which is high enough that its geometry clears every machine in the catalogue,
+            // measured one by one, even the three that are taller than it overall.
+            const zFace = 0.27, y = 1.55;
+            const backplate = cyl(0.08, 0.08, 0.06, 12, 0x8a9196); backplate.rotation.x = Math.PI / 2;
+            backplate.position.set(0, y, zFace + 0.05); g.add(backplate);
+            const bell = cyl(0.16, 0.14, 0.07, 14, col); bell.rotation.x = Math.PI / 2;
+            bell.position.set(0, y, zFace); g.add(bell);
+            const rim = cyl(0.165, 0.165, 0.02, 14, 0x6b7075); rim.rotation.x = Math.PI / 2;
+            rim.position.set(0, y, zFace - 0.035); g.add(rim);
+            const boss = cyl(0.05, 0.05, 0.03, 10, 0x6b7075); boss.rotation.x = Math.PI / 2;
+            boss.position.set(0, y, zFace - 0.05); g.add(boss);
+            // The one bit of colour: a beacon on the underside that only lights while it's going
+            // off, so a quiet alarm reads as a grey fitting and a sounding one is unmistakable.
+            const lamp = cyl(0.055, 0.045, 0.06, 8, 0xe0454a, { transparent: true, opacity: 0.95 });
+            lamp.position.set(0, y - 0.19, zFace); lamp.visible = false;
+            lamp.userData.alarmLamp = true; g.add(lamp);
         } else if (e.type === 'scale') {
             const base = box(0.6, 0.1, 0.5, col); base.position.y = 0.35; g.add(base);
             for (const [x, z] of [[.22, .18], [-.22, .18], [.22, -.18], [-.22, -.18]]) {
@@ -1059,8 +1069,30 @@ class LabScene {
             trace.position.set(-fw * 0.15, 0.75, cabFace + 0.08); trace.userData.spin = true; g.add(trace);
         }
 
+        // Snapshot every material's colour as built, so the wear shading below is always applied
+        // to the original rather than compounding on the last frame's result.
+        g.userData.basePalette = [];
+        g.traverse(o => {
+            if (o.isMesh && o.material && o.material.color && o !== cross && !cross.children.includes(o))
+                g.userData.basePalette.push([o.material, o.material.color.getHex()]);
+        });
+        g.userData.shade = 1;
+
         if (e.id != null) this._applyEquipTransform(g, e);
         return g;
+    }
+    // Wear shading. Nothing happens down to COND_SLOW_THRESHOLD — a machine in normal service
+    // looks normal — and below that it darkens progressively toward SHADE_MIN, so the visible
+    // change starts at exactly the point where the condition begins to cost you run time.
+    _applyCondition(mesh, condition) {
+        const t = Math.max(0, Math.min(1, (COND_SLOW_THRESHOLD - condition) / COND_SLOW_THRESHOLD));
+        const shade = 1 - (1 - SHADE_MIN) * t;
+        if (Math.abs(shade - mesh.userData.shade) < 0.01) return;   // only repaint on a real change
+        mesh.userData.shade = shade;
+        for (const [mat, hex] of mesh.userData.basePalette || []) {
+            mat.color.setHex(hex);
+            mat.color.multiplyScalar(shade);
+        }
     }
     _applyEquipTransform(g, e) {
         const c = equipCenterWorld(e.type, e.tx, e.tz, e.rot);
@@ -1175,6 +1207,14 @@ class LabScene {
         const head = box(0.22, 0.22, 0.22, skinCol); head.position.y = 0.85;
         const hair = box(0.24, 0.08, 0.24, hairCol); hair.position.y = 0.97;
         body.add(legs, coat, head, hair);
+        // The hood only appears while suited; the coat and legs just change colour, so a gowned
+        // worker still reads as the same person underneath.
+        const hood = box(0.26, 0.26, 0.26, SUIT_HOOD); hood.position.y = 0.86; hood.visible = false;
+        const visor = box(0.16, 0.09, 0.03, 0x2b3d4a, { transparent: true, opacity: 0.85 });
+        visor.position.set(0, 0.87, 0.14); visor.visible = false;
+        body.add(hood, visor);
+        g.userData.coat = coat; g.userData.legs = legs; g.userData.hood = hood; g.userData.visor = visor;
+        g.userData.suited = false;
         if (s.hairLong) {
             // Hangs down the back of the head rather than just capping it — same hair color,
             // assigned once at hiring alongside the short/long choice so it doesn't change look
@@ -1207,6 +1247,117 @@ class LabScene {
         return g;
     }
 
+    // Contractors on site. Deliberately a different silhouette from the scientists — hi-vis
+    // overalls, a hard hat and a toolbox on the floor beside them while they work — so a mechanic
+    // in among the staff reads as "somebody who doesn't work here" at a glance, which is the
+    // whole point of showing the visit rather than applying it overnight.
+    _buildVisitor(v) {
+        if (v.kind === 'firefighter') return this._buildFirefighter(v);
+        if (v.kind === 'cleaner') return this._buildCleaner(v);
+        const g = new THREE.Group();
+        g.userData = { kind: 'visitor', id: v.id, facing: 0, working: false };
+        const body = new THREE.Group();
+        const legs = box(0.26, 0.3, 0.2, 0x2f3a4a); legs.position.y = 0.15;
+        const overalls = box(0.34, 0.42, 0.24, VISITOR_COAT); overalls.position.y = 0.52;
+        const strap = box(0.36, 0.07, 0.26, 0x2f3a4a); strap.position.y = 0.62;
+        const head = box(0.22, 0.22, 0.22, 0xd39d6e); head.position.y = 0.85;
+        const helmet = box(0.26, 0.1, 0.26, VISITOR_HAT); helmet.position.y = 0.98;
+        const peak = box(0.24, 0.05, 0.1, VISITOR_HAT); peak.position.set(0, 0.95, 0.16);
+        body.add(legs, overalls, strap, head, helmet, peak);
+
+        // The spanner swings while they're actually working on something and is stowed otherwise.
+        const arm = new THREE.Group();
+        const hand = box(0.09, 0.22, 0.09, VISITOR_COAT); hand.position.y = -0.11; arm.add(hand);
+        const spanner = box(0.05, 0.3, 0.05, 0xb8c2c6); spanner.position.y = -0.3; arm.add(spanner);
+        const jaw = box(0.11, 0.09, 0.06, 0xb8c2c6); jaw.position.y = -0.44; arm.add(jaw);
+        arm.position.set(0.2, 0.66, 0.1);
+        body.add(arm);
+
+        // Toolbox: carried at their side on the walk, set down on the floor while they work.
+        const kit = new THREE.Group();
+        const kbody = box(0.26, 0.16, 0.18, 0xc4442f); kbody.position.y = 0.08; kit.add(kbody);
+        const klid = box(0.28, 0.04, 0.2, 0x8f2f20); klid.position.y = 0.18; kit.add(klid);
+        const khandle = box(0.1, 0.04, 0.03, 0x6b7075); khandle.position.y = 0.23; kit.add(khandle);
+        kit.position.set(-0.24, 0.3, 0);
+        body.add(kit);
+
+        g.userData.body = body; g.userData.arm = arm; g.userData.kit = kit;
+        g.add(body);
+        return g;
+    }
+
+    // Fire crew: dark turnout coat with two hi-vis bands, yellow helmet, air cylinder on the back
+    // and a branch in both hands. The jet only exists while they're actually fighting a fire —
+    // that, plus the fire going out under it, is what makes the visit read as them doing the work
+    // rather than a timer expiring somewhere off-screen.
+    _buildFirefighter(v) {
+        const g = new THREE.Group();
+        g.userData = { kind: 'visitor', id: v.id, facing: 0, working: false };
+        const body = new THREE.Group();
+        const legs = box(0.26, 0.3, 0.2, FIRE_COAT); legs.position.y = 0.15;
+        const legBand = box(0.27, 0.05, 0.21, FIRE_BAND); legBand.position.y = 0.24;
+        const coat = box(0.36, 0.44, 0.26, FIRE_COAT); coat.position.y = 0.53;
+        const band1 = box(0.37, 0.06, 0.27, FIRE_BAND); band1.position.y = 0.45;
+        const band2 = box(0.37, 0.06, 0.27, FIRE_BAND); band2.position.y = 0.63;
+        const head = box(0.22, 0.22, 0.22, 0xe8b48c); head.position.y = 0.86;
+        const helmet = box(0.28, 0.13, 0.28, FIRE_HAT); helmet.position.y = 0.99;
+        const brim = box(0.3, 0.05, 0.14, FIRE_HAT); brim.position.set(0, 0.93, -0.17);   // rear brim
+        const tank = cyl(0.09, 0.09, 0.34, 10, 0xb8c2c6); tank.position.set(0, 0.58, -0.2);
+        body.add(legs, legBand, coat, band1, band2, head, helmet, brim, tank);
+
+        // Branch held out in front, and the jet from it.
+        const arm = new THREE.Group();
+        const hands = box(0.3, 0.1, 0.1, FIRE_COAT); hands.position.set(0, 0, 0.04); arm.add(hands);
+        const branch = box(0.07, 0.07, 0.3, 0x8a9196); branch.position.set(0, 0, 0.2); arm.add(branch);
+        const nozzle = cyl(0.045, 0.06, 0.1, 8, 0xc4442f); nozzle.rotation.x = Math.PI / 2;
+        nozzle.position.set(0, 0, 0.38); arm.add(nozzle);
+        const jetGeo = new THREE.ConeGeometry(0.26, 1.0, 8, 1, true);
+        jetGeo.rotateX(Math.PI / 2);                 // point it forward instead of up
+        jetGeo.translate(0, 0, 0.5);
+        const jet = new THREE.Mesh(jetGeo, lmat(0xcfe8f2, { transparent: true, opacity: 0.45 }));
+        jet.position.set(0, 0, 0.42); jet.visible = false;
+        arm.add(jet);
+        arm.position.set(0, 0.66, 0.16);
+        body.add(arm);
+
+        g.userData.body = body; g.userData.arm = arm; g.userData.jet = jet;
+        g.add(body);
+        return g;
+    }
+    // Disinfection crew: full white hazmat suit with a hood and dark visor, green trim, a tank on
+    // the back and a fogging wand. Deliberately close to how staff look gowned up for a
+    // Containment Lab — same job, done properly — but head to toe and in a different palette.
+    _buildCleaner(v) {
+        const g = new THREE.Group();
+        g.userData = { kind: 'visitor', id: v.id, facing: 0, working: false };
+        const body = new THREE.Group();
+        const legs = box(0.26, 0.3, 0.2, CLEAN_SUIT); legs.position.y = 0.15;
+        const boots = box(0.28, 0.09, 0.22, CLEAN_TRIM); boots.position.y = 0.05;
+        const suit = box(0.36, 0.44, 0.26, CLEAN_SUIT); suit.position.y = 0.53;
+        const belt = box(0.37, 0.05, 0.27, CLEAN_TRIM); belt.position.y = 0.36;
+        const hood = box(0.28, 0.28, 0.28, CLEAN_SUIT); hood.position.y = 0.88;
+        const visor = box(0.19, 0.11, 0.03, CLEAN_VISOR, { transparent: true, opacity: 0.85 });
+        visor.position.set(0, 0.9, 0.15);
+        const tank = box(0.2, 0.3, 0.14, CLEAN_TRIM); tank.position.set(0, 0.58, -0.2);
+        body.add(legs, boots, suit, belt, hood, visor, tank);
+
+        const arm = new THREE.Group();
+        const hand = box(0.09, 0.2, 0.09, CLEAN_SUIT); hand.position.y = -0.1; arm.add(hand);
+        const wand = box(0.04, 0.04, 0.34, 0xb8c2c6); wand.position.set(0, -0.18, 0.16); arm.add(wand);
+        const fogGeo = new THREE.ConeGeometry(0.3, 0.85, 8, 1, true);
+        fogGeo.rotateX(Math.PI / 2);
+        fogGeo.translate(0, 0, 0.42);
+        const fog = new THREE.Mesh(fogGeo, lmat(0xb8e8cf, { transparent: true, opacity: 0.4 }));
+        fog.position.set(0, -0.18, 0.34); fog.visible = false;
+        arm.add(fog);
+        arm.position.set(0.16, 0.66, 0.1);
+        body.add(arm);
+
+        g.userData.body = body; g.userData.arm = arm; g.userData.jet = fog;
+        g.add(body);
+        return g;
+    }
+
     // ---------- reconcile ----------
     sync(state, dt) {
         // Simulated movement is scaled by game speed (tick() feeds staff/samples dt*speed), but this
@@ -1222,6 +1373,7 @@ class LabScene {
         // they're drawn by _updateFloor as floor, so they get no mesh here — which also keeps them
         // out of _pick()'s raycast, so clicking inside one lands on the tile and you can actually
         // build there.
+        const burning = new Set((state.fires || []).map(f => f.equipId));
         this._reconcile(this.equipMeshes, state.equipment.filter(e => !BUILD[e.type].room), e => this._buildEquip(e), (mesh, e) => {
             // Position as well as rotation: the Move tool changes tx/tz without touching rot, and
             // checking rot alone left the mesh sitting at its old spot until the page reloaded.
@@ -1269,15 +1421,38 @@ class LabScene {
             // Reliability light: red and blinking once broken (can't accept new work until a
             // mechanic fixes it), steady amber once worn enough that a breakdown becomes a real
             // risk, otherwise hidden — most machines spend most of their life not showing this.
-            const wl = mesh.userData.warnLight;
-            if (e.broken) {
-                wl.visible = Math.sin(this.elapsed * 9) > -0.2;
-                wl.material.color.setHex(0xe0454a);
-            } else if ((e.condition ?? 100) < COND_BREAKDOWN_THRESHOLD) {
-                wl.visible = true;
-                wl.material.color.setHex(0xf0a03c);
-            } else {
-                wl.visible = false;
+            // Fire. Drawn straight from state.fires rather than from a flag on the mesh, so a
+            // machine that was set alight by a save-load or by spread lights up the same way.
+            const alight = burning.has(e.id);
+            const fire = mesh.userData.fire;
+            if (fire) {
+                fire.visible = alight;
+                if (alight) for (const part of fire.children) {
+                    const f = part.userData.flick;
+                    const k = 0.82 + 0.3 * Math.sin(this.elapsed * 7 * f + f * 9);
+                    part.scale.set(1, k, 1);
+                    part.rotation.y = this.elapsed * f * 0.7;
+                }
+            }
+            // The alarm's own bell lights while an evacuation is under way — that's the one part
+            // of the lab that's meant to be visibly doing something during one.
+            mesh.traverse(o => {
+                if (o.userData.alarmLamp) o.visible = state.evacuating && Math.sin(this.elapsed * 11) > -0.1;
+            });
+
+            // A machine that's actually on fire is already unmistakable, so it keeps its own
+            // colours — layering wear shading under the flames just made it muddy.
+            this._applyCondition(mesh, alight ? 100 : (e.condition ?? 100));
+            const cross = mesh.userData.cross;
+            if (cross) {
+                cross.visible = e.broken && !alight;
+                if (cross.visible) {
+                    cross.rotation.y = this.controls.getAzimuthalAngle();   // billboard: square-on at every camera angle
+                    // A slow pulse rather than a hard blink — enough to catch the eye on a busy
+                    // floor without flickering at you the whole time it sits there unfixed.
+                    const k = 1 + Math.sin(this.elapsed * 3) * 0.07;
+                    cross.scale.set(k, k, 1);
+                }
             }
         });
 
@@ -1331,6 +1506,8 @@ class LabScene {
         }
         for (const arr of waitGroups.values()) arr.sort((x, y) => x - y);
 
+        // Room floors that call for protective kit, gathered once rather than per worker.
+        const suitedTiles = roomAreas(state);
         this._reconcile(this.staffMeshes, state.staff, s => this._buildStaff(s), (mesh, s) => {
             let tx = s.wx, tz = s.wz;
             const group = s.state === 'atStation' && s.job ? waitGroups.get(s.job.stationId) : null;
@@ -1357,11 +1534,28 @@ class LabScene {
             // than half a tile (the lerp has no notion of game speed), so clamping movers too would
             // make fast-forward staff visibly snap around instead of walking smoothly.
             mesh.userData.truePos = STATIONARY_STATES.has(s.state) ? { x: s.wx, z: s.wz } : null;
+            // Suited while standing on the floor of a room that has to hold its air.
+            const tile = `${Math.floor(s.wx + GRID / 2)},${Math.floor(s.wz + GRID / 2)}`;
+            const suited = SUITED_ROOM_KINDS.some(k => (suitedTiles.get(k) || EMPTY_SET).has(tile));
+            if (suited !== mesh.userData.suited) {
+                mesh.userData.suited = suited;
+                mesh.userData.coat.material.color.setHex(suited ? SUIT_COLOR : COAT_COLOR);
+                mesh.userData.legs.material.color.setHex(suited ? SUIT_COLOR : 0x394a63);
+                mesh.userData.hood.visible = suited;
+                mesh.userData.visor.visible = suited;
+            }
             mesh.userData.mopping = s.state === 'mopping';
             const idling = s.state === 'idle' || s.state === 'resting';
             const cm = this.coffeeMachine.position;
             mesh.userData.chatterEligible = idling && Math.hypot(s.wx - cm.x, s.wz - cm.z) < 2.0;
             mesh.userData.radioEligible = idling && state.upgrades.radio > 0;
+        });
+        // Visitors ride their own map rather than being folded into state.staff, so nothing that
+        // iterates staff (capacity, wages, the Staff panel, the separation pass) has to learn to
+        // skip them.
+        this._reconcile(this.visitorMeshes, state.visitors || [], v => this._buildVisitor(v), (mesh, v) => {
+            mesh.userData.target = { x: v.wx, y: 0, z: v.wz };
+            mesh.userData.working = v.state === 'working' || v.state === 'fighting' || v.state === 'fogging';
         });
         if (this.radioProp) this.radioProp.visible = state.upgrades.radio > 0;
 
@@ -1462,7 +1656,38 @@ class LabScene {
             if (mesh.userData.mopping) mop.rotation.z = 0.15 + Math.abs(Math.sin(this.elapsed * 6.5)) * 0.75;
             this._updateChatter(mesh);
         });
-        this._separateStaff();
+        this.visitorMeshes.forEach((mesh) => {
+            const d = step(mesh);
+            const moving = d && (Math.abs(d.dx) + Math.abs(d.dz)) > 0.003;
+            if (moving) {
+                const want = Math.atan2(d.dx, d.dz);
+                let diff = want - mesh.userData.facing;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                mesh.userData.facing += diff * 0.25;
+                mesh.rotation.y = mesh.userData.facing;
+            }
+            mesh.userData.body.position.y = moving ? Math.abs(Math.sin(this.elapsed * 9)) * 0.06 : 0;
+            const working = mesh.userData.working;
+            if (mesh.userData.kit) {
+                // Mechanic: spanner up and turning while they work, arm at their side while they
+                // walk, and the toolbox set down on the floor rather than carried.
+                mesh.userData.arm.rotation.x = working ? -0.9 + Math.sin(this.elapsed * 7) * 0.5 : 0;
+                mesh.userData.kit.position.y = working ? 0 : 0.3;
+                mesh.userData.kit.position.x = working ? -0.42 : -0.24;
+            } else if (mesh.userData.jet) {
+                // Fire crew and cleaners: the branch/wand comes up and the spray appears only
+                // while they're on the job, sweeping side to side rather than pointing rigidly.
+                mesh.userData.jet.visible = working;
+                mesh.userData.arm.rotation.y = working ? Math.sin(this.elapsed * 1.8) * 0.45 : 0;
+                mesh.userData.arm.rotation.x = working ? -0.1 : 0.35;
+                if (working) {
+                    const k = 0.9 + Math.sin(this.elapsed * 9) * 0.12;
+                    mesh.userData.jet.scale.set(k, k, 1);
+                }
+            }
+        });
+        this._separatePeople();
         this._syncSpeechBubbles();
         this._syncProgressBars();
 
@@ -1560,8 +1785,12 @@ class LabScene {
     // to the same access tile and would render stacked on each other. This nudges any staff that
     // end up too close apart each frame — a lightweight crowd-separation pass, purely cosmetic,
     // so waiting staff visibly stand aside instead of overlapping.
-    _separateStaff() {
-        const meshes = Array.from(this.staffMeshes.values());
+    // Keeps everyone on the floor out of each other's models — staff and visiting contractors
+    // alike. The pathfinder reasons in whole tiles and has no notion of two people wanting the
+    // same one, so without this a mechanic walking the aisle passes straight through a scientist
+    // stood at a bench.
+    _separatePeople() {
+        const meshes = [...this.staffMeshes.values(), ...this.visitorMeshes.values()];
         const MIN_DIST = 0.46, PUSH = 0.5;
         // Remember where everyone was before any nudging, so the clamp below can limit what this
         // pass moved without also fighting the render's legitimate lag behind a walking worker.

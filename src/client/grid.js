@@ -1,7 +1,7 @@
 // ==================== GRID GEOMETRY ====================
 // Pure spatial helpers: no game state lives here, everything takes it as a parameter.
 
-import { BUILD, ZONES } from './data.js';
+import { BUILD, ZONES, ROOM_DOOR_REQ } from './data.js';
 
 export const GRID = 16;
 const HALF = GRID / 2;
@@ -113,32 +113,79 @@ function doorwayUsable(state, x, z, roomTiles) {
     if (!isWalkableGround(state, x, z)) return false;
     if (roomTiles.has(`${x},${z}`)) return false;
     for (const e of state.equipment || []) {
-        if (BUILD[e.type].room) continue;                    // room floor is fine to stand on
+        if (BUILD[e.type].room || BUILD[e.type].door || BUILD[e.type].mount) continue;   // floor, doorways and wall fittings are fine to stand on
         if (footTiles(e.type, e.tx, e.tz, e.rot).some(([ex, ez]) => ex === x && ez === z)) return false;
     }
     return true;
 }
-// One doorway per connected run, on the edge that actually opens onto usable floor. Returns null
-// for a run that has no such edge at all — a sealed room, which canPlace() refuses to create.
-export function pickDoorway(state, tiles, group) {
-    let best = null, bestRank = Infinity;
-    for (const key of [...group].sort()) {
-        const [x, z] = key.split(',').map(Number);
-        DOOR_PREF.forEach(([dx, dz], i) => {
-            if (tiles.has(`${x + dx},${z + dz}`)) return;               // interior edge
-            if (!doorwayUsable(state, x + dx, z + dz, tiles)) return;
-            if (i < bestRank) { bestRank = i; best = `${key}|${dx},${dz}`; }
-        });
-    }
-    return best;
+// Which way a door faces, by rotation — the same mapping the models and staff approach code use,
+// where 0 is south.
+export const DOOR_FACING = [[0, 1], [-1, 0], [0, -1], [1, 0]];
+export function doorPieces(state) {
+    return (state.equipment || []).filter(e => BUILD[e.type] && BUILD[e.type].door);
 }
-export function roomDoorways(state, tiles) {
+// Where a given door actually opens: the tile it stands on, and the edge it faces.
+export function doorOpening(e) {
+    const [dx, dz] = DOOR_FACING[(e.rot || 0) % 4];
+    return { x: e.tx, z: e.tz, dx, dz, kind: BUILD[e.type].door };
+}
+// Is this door good enough for this kind of room? An airlock satisfies everything; a plain door
+// only satisfies rooms that don't have to hold an atmosphere.
+export function doorSatisfies(doorKind, roomKind) {
+    const need = ROOM_DOOR_REQ[roomKind] || 'door';
+    return doorKind === 'airlock' || need === 'door';
+}
+// The openings in a given room's walls: every placed door standing on one of its tiles and facing
+// out of it. Unlike the old auto-picked doorway, a room with nothing placed simply has no way in —
+// which is the player's problem to notice, and why sealedRooms() exists to tell them.
+export function roomDoorways(state, tiles, kind) {
     const doors = new Set();
-    for (const group of roomGroups(tiles)) {
-        const d = pickDoorway(state, tiles, group);
-        if (d) doors.add(d);
+    for (const e of doorPieces(state)) {
+        const o = doorOpening(e);
+        if (!tiles.has(`${o.x},${o.z}`)) continue;                       // not in this room
+        if (tiles.has(`${o.x + o.dx},${o.z + o.dz}`)) continue;          // faces further into it
+        if (kind && !doorSatisfies(o.kind, kind)) continue;              // not a good enough door
+        doors.add(`${o.x},${o.z}|${o.dx},${o.dz}`);
     }
     return doors;
+}
+// The break room is the one area the player doesn't build, so it keeps an automatic doorway rather
+// than needing a door placed in it: whichever edge opens onto usable floor, preferring the side the
+// traffic comes from.
+export function breakRoomDoorway(state, tiles) {
+    const doors = new Set();
+    for (const group of roomGroups(tiles)) {
+        let best = null, bestRank = Infinity;
+        for (const key of [...group].sort()) {
+            const [x, z] = key.split(',').map(Number);
+            DOOR_PREF.forEach(([dx, dz], i) => {
+                if (tiles.has(`${x + dx},${z + dz}`)) return;
+                if (!doorwayUsable(state, x + dx, z + dz, tiles)) return;
+                if (i < bestRank) { bestRank = i; best = `${key}|${dx},${dz}`; }
+            });
+        }
+        if (best) doors.add(best);
+    }
+    return doors;
+}
+
+// Connected runs of room that have no usable way in, for warning the player about.
+export function sealedRooms(state) {
+    const out = [];
+    for (const [kind, tiles] of roomAreas(state)) {
+        if (kind === 'break') continue;                                  // the annex has its own fixed doorway
+        const doors = roomDoorways(state, tiles, kind);
+        for (const group of roomGroups(tiles)) {
+            const hasDoor = [...doors].some(d => {
+                const [key, dir] = d.split('|');
+                const [dx, dz] = dir.split(',').map(Number);
+                const [x, z] = key.split(',').map(Number);
+                return group.includes(key) && doorwayUsable(state, x + dx, z + dz, tiles);
+            });
+            if (!hasDoor) out.push({ kind, tiles: group });
+        }
+    }
+    return out;
 }
 
 export function tileToWorld(tx, tz) { return { x: tx - HALF + 0.5, z: tz - HALF + 0.5 }; }
@@ -195,11 +242,78 @@ export function zoneOwnedTileCount(ownedZones) {
 function tileBlocked(equipment, tx, tz, ignoreId, placingRoom) {
     for (const e of equipment) {
         if (e.id === ignoreId) continue;
+        if (BUILD[e.type].mount) continue;                   // hangs on the wall above — see mountBlocked()
         if (!footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz)) continue;
         if (!!BUILD[e.type].room !== placingRoom) continue;   // floor vs. furniture — different layers
         return true;
     }
     return false;
+}
+// A door stands in a room's wall, so it shares that tile with the room floor by design; what it
+// can't share is that tile with another door or a machine.
+function doorBlocked(equipment, tx, tz, ignoreId) {
+    return equipment.some(e => e.id !== ignoreId && !BUILD[e.type].room &&
+        footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz));
+}
+// A wall fitting hangs well above head height on the wall of its tile and takes up no floor at
+// all, so unlike a door it happily shares a tile with whatever is standing there — that's the
+// point of mounting it rather than parking it on the floor. The only things it can't share with
+// are another fitting and a doorway, which both want the same piece of wall.
+function mountBlocked(equipment, tx, tz, ignoreId) {
+    return equipment.some(e => e.id !== ignoreId && (BUILD[e.type].mount || BUILD[e.type].door) &&
+        footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz));
+}
+
+// Anything wall-mounted (a fire alarm) has to actually have a wall to hang on: either the
+// building's own shell — the edge of the buildable area, or a boundary with ground you don't own —
+// or the partition of a room it's standing against. Checked as "is at least one of my four edges
+// a wall", which is exactly what the renderer draws.
+// Where the building's outer shell actually stands. This is the single source of truth for it:
+// threeScene draws its wall segments from this and placement reads it, so a fitting can never be
+// hung on a stretch of wall that isn't drawn. Note what is NOT a wall here — a plot you haven't
+// bought yet is still *inside* the shell, just unbought land, so the boundary with one is open
+// floor with nothing to hang anything on.
+export function isShellWall(tx, tz) {
+    if (tx < 0 || tx >= GRID || tz < 0) return true;
+    // The break room is an annex bolted onto the side, so the shell doesn't close across where
+    // the two meet — its own partition wall, with the doorway in it, is the boundary there.
+    if (tx >= BREAK_ROOM_MAX.x0 && tx < BREAK_ROOM_MAX.x0 + BREAK_ROOM_MAX.w &&
+        tz >= BREAK_ROOM_MAX.z0 && tz < BREAK_ROOM_MAX.z0 + BREAK_ROOM_MAX.h) return false;
+    if (tz === BUILD_MAX_Z + 1) {                                   // entrance row
+        const [lo, hi] = gateXRange();
+        return tx < lo || tx > hi;                                  // open for the gate room's width
+    }
+    if (tz > BUILD_MAX_Z + 1) return false;
+    return !zoneAt(tx, tz);
+}
+// Wall fittings hang on the outer shell only. Room partitions are half-height (0.85 against the
+// shell's 1.60) and a fitting mounted high enough to clear the machines would hang in the air
+// above one, so they don't count — which is also why this doesn't look at rooms at all.
+function isWallEdge(tx, tz, dx, dz) { return isShellWall(tx + dx, tz + dz); }
+export function wallAdjacent(state, tx, tz) {
+    return EDGE_DIRS.some(([dx, dz]) => isWallEdge(tx, tz, dx, dz));
+}
+// Which way a wall fitting on this tile should face. A fitting hangs on a wall, so its rotation
+// isn't the player's to get wrong: it's decided by where the wall actually is. Snapped at
+// placement (and again on a move) rather than only at render time, so the saved rotation always
+// matches what's drawn — otherwise a fitting whose wall later disappeared would go on facing a
+// direction with nothing behind it, which is exactly what "floating in mid-air" looks like.
+// Keeps the requested rotation when that side happens to be a wall, so a player who deliberately
+// picked one of two walls on a corner tile gets the one they picked.
+export function wallFacing(state, tx, tz, preferRot) {
+    const order = [((preferRot || 0) % 4 + 4) % 4, 0, 1, 2, 3];
+    for (const rot of order) {
+        const [dx, dz] = DOOR_FACING[rot];
+        if (isWallEdge(tx, tz, dx, dz)) return rot;
+    }
+    return preferRot || 0;
+}
+// Where staff line up when the building is evacuated: out on the pavement past the front door,
+// well clear of anything that's alight inside.
+export function musterTile(i) {
+    const [lo, hi] = gateXRange();
+    const n = Math.max(1, hi - lo + 1);
+    return [lo + (i % n), GRID - 1];
 }
 
 export function canPlace(state, type, tx, tz, rot, ignoreId) {
@@ -210,20 +324,24 @@ export function canPlace(state, type, tx, tz, rot, ignoreId) {
         if (x < 0 || z < 0 || x >= GRID || z > BUILD_MAX_Z) return { ok: false, why: 'out of bounds' };
         if (!isTileOwned(state.ownedZones, x, z)) return { ok: false, why: 'unowned land' };
         if (inBreakRoom(state, x, z)) return { ok: false, why: 'break room' };
-        if (tileBlocked(state.equipment, x, z, ignoreId, !!b.room)) return { ok: false, why: 'blocked' };
+        const clash = b.mount ? mountBlocked(state.equipment, x, z, ignoreId)
+                    : b.door  ? doorBlocked(state.equipment, x, z, ignoreId)
+                              : tileBlocked(state.equipment, x, z, ignoreId, !!b.room);
+        if (clash) return { ok: false, why: 'blocked' };
     }
-    // A room's walls really do block movement, so one with nowhere to put a door would seal
-    // whatever ends up inside it away from the rest of the lab. Check the run it would belong to
-    // (itself plus any same-kind rooms it merges with) still has an edge opening onto usable floor.
-    if (b.room) {
-        const tiles = new Set(foot.map(([x, z]) => `${x},${z}`));
-        for (const e of state.equipment) {
-            if (e.id === ignoreId || !BUILD[e.type].room || BUILD[e.type].kind !== b.kind) continue;
-            for (const [x, z] of footTiles(e.type, e.tx, e.tz, e.rot)) tiles.add(`${x},${z}`);
-        }
-        const mine = `${foot[0][0]},${foot[0][1]}`;
-        const group = roomGroups(tiles).find(gp => gp.includes(mine));
-        if (group && !pickDoorway(state, tiles, group)) return { ok: false, why: 'no room for a doorway' };
+    if (b.mount && !wallAdjacent(state, tx, tz)) return { ok: false, why: 'needs an outside wall to hang on' };
+    // A doorway has to actually be in a wall: it goes on one of the room's own tiles and opens
+    // outward, and it has to be good enough for what that room is holding in.
+    if (b.door) {
+        const [tx0, tz0] = foot[0];
+        const areas = roomAreas(state);
+        let kind = null, tiles = null;
+        for (const [k, set] of areas) if (set.has(`${tx0},${tz0}`)) { kind = k; tiles = set; }
+        if (!kind || kind === 'break') return { ok: false, why: 'must go on a room tile' };
+        const [dx, dz] = DOOR_FACING[(rot || 0) % 4];
+        if (tiles.has(`${tx0 + dx},${tz0 + dz}`)) return { ok: false, why: 'faces into the room — rotate it' };
+        if (!doorSatisfies(b.door, kind)) return { ok: false, why: 'this room needs an airlock' };
+        if (!doorwayUsable(state, tx0 + dx, tz0 + dz, tiles)) return { ok: false, why: 'opens onto nothing' };
     }
     return { ok: true };
 }
@@ -266,7 +384,8 @@ export function buildNav(state) {
     // its floor stays walkable so staff can mill about in there.
     for (const p of breakRoomProps(state)) g[p.tile[1] * GRID + p.tile[0]] = 1;
     for (const e of state.equipment) {
-        if (BUILD[e.type].room) continue;   // a room is floor, not an obstacle — equipment placed inside it still blocks normally
+        // Floor, doorways and wall-mounted kit are all things you walk through or past, not round.
+        if (BUILD[e.type].room || BUILD[e.type].door || BUILD[e.type].mount) continue;
         for (const [x, z] of footTiles(e.type, e.tx, e.tz, e.rot))
             if (x >= 0 && z >= 0 && x < GRID && z < GRID) g[z * GRID + x] = 1;
     }
@@ -274,8 +393,8 @@ export function buildNav(state) {
     // no floor space to wall off and staff simply have to come in through the door. Carried on the
     // nav array itself so it can't be passed around half-applied — see aStar().
     const walls = new Uint8Array(GRID * GRID);
-    for (const [, tiles] of roomAreas(state)) {
-        const doors = roomDoorways(state, tiles);
+    for (const [kind, tiles] of roomAreas(state)) {
+        const doors = kind === 'break' ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
         for (const key of tiles) {
             const [x, z] = key.split(',').map(Number);
             for (const [dx, dz, bit, opp] of EDGE_DIRS) {
@@ -286,6 +405,13 @@ export function buildNav(state) {
                 if (nx >= 0 && nz >= 0 && nx < GRID && nz < GRID) walls[nz * GRID + nx] |= opp;
             }
         }
+    }
+    // A containment breach seals the room: nobody walks in there again until the disinfection
+    // crew has been through, so its tiles come out of the nav grid entirely rather than just
+    // being discouraged.
+    for (const key of (state.outbreak ? state.outbreak.tiles : [])) {
+        const [x, z] = key.split(',').map(Number);
+        if (x >= 0 && z >= 0 && x < GRID && z < GRID) g[z * GRID + x] = 1;
     }
     g.walls = walls;
     return g;

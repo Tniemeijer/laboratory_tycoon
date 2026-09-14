@@ -15,13 +15,16 @@ import {
     BUILD, PROTOCOLS, REAGENTS,
     BATCH_MAX_WAIT, BATCH_TIME_PER_EXTRA,
     WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE, COND_SLOW_THRESHOLD, COND_SLOW_MAX,
-    COND_BREAKDOWN_THRESHOLD, COND_BREAKDOWN_CHANCE_MAX, MECH_MAINT_THRESHOLD, MECH_MAINT_GAIN,
+    COND_BREAKDOWN_THRESHOLD, COND_BREAKDOWN_CHANCE_MAX, MECH_MAINT_THRESHOLD,
+    MECH_CALLOUT_FEE, MECH_REPAIR_COST, MECH_SERVICE_COST,
     ROOM_QUALITY_BONUS, SUPPLIES, SUPPLY_FOR_CAP
 } from '../data.js';
 import { G, cleanliness, speedMul, insideAnyRoom, dirtyUI } from '../core.js';
 import { takeStock } from './economy.js';
 import { addDirt } from './dirt.js';
 import { completeContract } from './contracts.js';
+import { fireRoll, outbreakRoll, isBurning, isQuarantined } from './incidents.js';
+import { spawnMechanic, underService, mechanicOnSite } from './visitors.js';
 
 function takeReagent(type) {
     const s = G.state;
@@ -49,7 +52,7 @@ export function stageSample(st, sm) {
 // just because enough material has piled up.
 export function batchReady(st) {
     const b = BUILD[st.type];
-    if (st.broken || !st.staged || !st.staged.length) return null;
+    if (st.broken || isBurning(st) || isQuarantined(st) || underService(st) || !st.staged || !st.staged.length) return null;
     if ((st.processing ? st.processing.length : 0) >= (b.slots || 1)) return null;
 
     // Only identical requests (same protocol + same step) can share a run — group in arrival
@@ -146,6 +149,10 @@ function applyWear(st, n) {
             G.onToast(`${BUILD[st.type].name} broke down! Needs a mechanic.`, true);
         }
     }
+    // A breakdown is the *good* outcome of neglect. Both of these ride on the same completed-run
+    // event, so condition only ever matters on machines that are actually being worked.
+    fireRoll(st);
+    outbreakRoll(st);
 }
 
 function finishRun(st, p) {
@@ -181,6 +188,9 @@ export function updateEquipment(dt) {
         // that a run already under way still ticks to completion (and still wears the machine
         // down) even if the room granting its cap gets sold out from under it mid-run.
         if (b.cat !== 'Processing') continue;
+        // A machine that's alight, or shut inside a sealed containment room, isn't running
+        // anything — its contents were written off when the incident started.
+        if (isBurning(st) || isQuarantined(st)) continue;
         if (st.staged && st.staged.length) {
             for (const g of st.staged) g.wait += dt;
             // Automation (e.g. the Prep Robot) skips the "worker walks over to operate it" step
@@ -194,13 +204,48 @@ export function updateEquipment(dt) {
 
 // ---------- mechanic support (consumed by staff.js's assignJob) ----------
 export function findBrokenEquipment() {
-    return G.state.equipment.filter(e => e.broken && BUILD[e.type].cat === 'Processing');
+    return G.state.equipment.filter(e => e.broken && !isBurning(e) && BUILD[e.type].cat === 'Processing');
 }
+// Fire alarms are on the list too — an alarm nobody ever services is an alarm that doesn't go
+// off (see incidents.js alarmReliability()), which is exactly the trap this system is built on.
 export function findNeedsMaintenance() {
-    return G.state.equipment.filter(e => !e.broken && BUILD[e.type].cat === 'Processing' && (e.condition ?? 100) < MECH_MAINT_THRESHOLD);
+    return G.state.equipment.filter(e => !e.broken && !isBurning(e) &&
+        (BUILD[e.type].cat === 'Processing' || BUILD[e.type].mount) && (e.condition ?? 100) < MECH_MAINT_THRESHOLD);
 }
-export function finishRepair(st) { st.broken = false; st.condition = 100; }
-export function finishMaintenance(st) { st.condition = Math.min(100, (st.condition ?? 100) + MECH_MAINT_GAIN); }
+// ---------- the mechanic ----------
+// What a visit would cost and cover if they turned up right now.
+export function mechanicQuote() {
+    const broken = findBrokenEquipment(), worn = findNeedsMaintenance();
+    return {
+        broken: broken.length, worn: worn.length,
+        cost: (broken.length || worn.length)
+            ? MECH_CALLOUT_FEE + broken.length * MECH_REPAIR_COST + worn.length * MECH_SERVICE_COST : 0
+    };
+}
+export function callMechanic() {
+    const s = G.state;
+    if (s.mechanicDay != null) return G.onToast(`A mechanic is already booked for Day ${s.mechanicDay}`, true);
+    if (mechanicOnSite()) return G.onToast(`There's a mechanic on the floor right now — let them finish`, true);
+    const q = mechanicQuote();
+    if (!q.broken && !q.worn) return G.onToast('Nothing needs fixing or servicing', true);
+    s.mechanicDay = s.day + 1;
+    G.onToast(`Mechanic booked for Day ${s.mechanicDay} — ${q.broken} to repair, ${q.worn} to service, about $${q.cost.toLocaleString()}`);
+    dirtyUI();
+}
+// Called on the day rollover: the mechanic turns up at the front door that morning with the list
+// of everything outstanding — which may be more than was on it when you rang, and is billed
+// accordingly. The work itself happens on the floor over the following minute or so, machine by
+// machine, as they walk the list; see systems/visitors.js. Nothing is repaired here.
+export function mechanicVisit() {
+    const s = G.state;
+    if (s.mechanicDay == null || s.day < s.mechanicDay) return;
+    s.mechanicDay = null;
+    const jobs = [
+        ...findBrokenEquipment().map(e => ({ id: e.id, repair: true })),
+        ...findNeedsMaintenance().map(e => ({ id: e.id, repair: false }))
+    ];
+    spawnMechanic(jobs);
+}
 
 // Cleanup hook for samples.js's abandonSample() — a sample can be sitting in staging rather than
 // in `processing` when it's abandoned (contamination, demolition, deadline).
