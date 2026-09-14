@@ -200,6 +200,10 @@ export function demolish(id) {
 
 // ---------- misc toggles ----------
 export function togglePause() { G.state.paused = !G.state.paused; dirtyUI(); }
+// Speed is picked directly rather than cycled. A single button that wrapped 1x -> 2x -> 3x -> 1x
+// read as broken: pressing "faster" a third time made the game slower, which is indistinguishable
+// from the button not registering. See the segmented control in index.html.
+export function setSpeed(n) { const s = G.state; if (s.speed === n) return; s.speed = n; dirtyUI(); }
 export function cycleSpeed() { const s = G.state; s.speed = s.speed === 1 ? 2 : s.speed === 2 ? 3 : 1; dirtyUI(); }
 export function toggleAutoPrep() { G.state.autoPrep = !G.state.autoPrep; dirtyUI(); }
 export function toggleColdStore() { G.state.coldStore = !G.state.coldStore; dirtyUI(); }

@@ -26,6 +26,19 @@ html, body {
 
 #hud { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
 #hud button, #hud #dropdown, #hud .stat, #hud #bar { pointer-events: auto; }
+/* Without this every tap on a HUD control is a possible double-tap-to-zoom, so mobile browsers
+   hold the `click` back ~300ms to see if a second tap arrives — and if one does, they zoom
+   instead of clicking. Tapping ⏸ or the speed button twice in quick succession is exactly that
+   gesture, which is why those two felt like they "didn't work all the time". `manipulation`
+   turns off double-tap zoom on these elements only; it still allows scrolling (the Build menu
+   keeps scrolling) and leaves the canvas's own touch-action: none for OrbitControls alone.
+   The tap highlight and text selection go too — a long press on a button used to select its
+   label and pop up the selection handles. */
+#hud button, #hud #dropdown, #hud .stat, #hud #bar, #hud #alerts {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none; user-select: none;
+}
 
 /* ---------- top bar ---------- */
 #bar {
@@ -61,6 +74,36 @@ html, body {
     background: var(--btn); border: 2px solid var(--edge); color: var(--ink);
     font-family: inherit; font-weight: 700; font-size: 13px; padding: 5px 10px; cursor: pointer;
 }
+/* The pause/play icon is drawn with CSS boxes rather than set as text. ⏸ (U+23F8) has emoji
+   presentation *by default* in Unicode, so iOS and Android substituted their colour emoji font
+   for it — the button came out as a glossy system emoji rather than the flat pixel-art glyph it
+   is on desktop, at a different size and baseline to boot. Shapes have no font to substitute. */
+/* The icon is laid out in normal flow (inline-flex), not absolutely positioned. An empty button
+   has a zero-height content box, so an absolutely-positioned icon left the button half the height
+   of its text siblings — 32x14 against their 40x29. In flow, the bars themselves give the button
+   its height, and the explicit box below keeps it matching the text buttons beside it. */
+#bar-pause {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    min-width: 40px; height: 29px; padding: 0 10px;
+}
+#bar-pause::before, #bar-pause::after {
+    content: ''; width: 4px; height: 13px; background: var(--ink);
+}
+/* .playing = the game is paused, so the button offers "play": one triangle, no second bar. */
+#bar-pause.playing::before {
+    width: 0; height: 0; background: none;
+    border-left: 12px solid var(--ink);
+    border-top: 7px solid transparent; border-bottom: 7px solid transparent;
+}
+#bar-pause.playing::after { display: none; }
+
+/* Speed is a segmented control, not a cycling button: three targets, the current one lit. One
+   tap to any speed and no state where pressing it makes the game slower than you asked for. */
+.speeds { display: inline-flex; }
+.speeds button { border-radius: 0; }
+.speeds button + button { margin-left: -2px; }        /* share the border between segments */
+.speeds button.on { background: #f0a03c; box-shadow: inset 0 0 0 2px #fff2d8; position: relative; }
+
 #bar button:hover { background: var(--btn-hi); }
 #bar button:active { transform: translateY(1px); }
 .menu-btn.open { background: #f0a03c; box-shadow: inset 0 0 0 2px #fff2d8; }
@@ -311,4 +354,11 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
     .daybar { width: 46px; }
     .menus { gap: 3px; margin-left: 0; }
     #bar button { font-size: 11px; padding: 4px 7px; }
+    /* Same box as the smaller text buttons on this breakpoint (31x24), icon scaled to suit. */
+    #bar-pause { min-width: 31px; height: 24px; padding: 0 7px; gap: 4px; }
+    .speeds button { padding: 4px 5px; }
+    #bar-pause::before, #bar-pause::after { width: 3px; height: 11px; }
+    #bar-pause.playing::before {
+        border-left-width: 10px; border-top-width: 6px; border-bottom-width: 6px;
+    }
 }

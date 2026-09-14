@@ -33,8 +33,12 @@
                 </div>
 
                 <div class="spacer"></div>
-                <button id="bar-pause">⏸</button>
-                <button id="bar-speed">1×</button>
+                <button id="bar-pause" aria-label="Pause or resume"></button>
+                <span id="bar-speed" class="speeds">
+                    <button data-speed="1" aria-label="Normal speed">1×</button>
+                    <button data-speed="2" aria-label="Double speed">2×</button>
+                    <button data-speed="3" aria-label="Triple speed">3×</button>
+                </span>
                 <button id="bar-new">New</button>
             </div>
         </div>

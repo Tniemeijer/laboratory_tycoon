@@ -5,7 +5,7 @@
 import {
     G, BUILD, labLevel, repToNext, cleanliness, roomAt,
     canPlace, canAfford, isUnlocked, placeEquipment, rotateEquipment, moveEquipment, demolish,
-    togglePause, cycleSpeed, newGame,
+    togglePause, setSpeed, newGame,
     evacuate, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
     DISINFECT_FEE, FIRE_BRIGADE_FEE
 } from '../game.js';
@@ -39,7 +39,8 @@ export function initUI() {
         b.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu(b.dataset.menu); });
     });
     $('bar-pause').addEventListener('click', () => togglePause());
-    $('bar-speed').addEventListener('click', () => cycleSpeed());
+    $('bar-speed').querySelectorAll('[data-speed]').forEach(b =>
+        b.addEventListener('click', () => setSpeed(+b.dataset.speed)));
     $('bar-new').addEventListener('click', () => { if (confirm('Start a new game? Progress is lost.')) newGame(); });
     $('rotate-pill').addEventListener('click', () => rotateHotkey());
     $('dropdown-close').addEventListener('click', () => closeMenu());
@@ -277,8 +278,11 @@ export function render(force) {
     $('bar-rep').innerHTML = `${'★'.repeat(lv)}<span class="dim">${'★'.repeat(5 - lv)}</span> ${s.reputation}${next ? `<span class="dim">/${next}</span>` : ''}`;
     $('bar-day').textContent = 'Day ' + s.day;
     $('bar-dayfill').style.width = (s.dayFrac * 100).toFixed(1) + '%';
-    $('bar-pause').textContent = s.paused ? '▶' : '⏸';
-    $('bar-speed').textContent = s.speed + '×';
+    // Icon is drawn in CSS (see #bar-pause) — a glyph here would be replaced by the system emoji
+    // font on mobile. `.playing` means the game is paused, so the button offers to resume.
+    $('bar-pause').classList.toggle('playing', s.paused);
+    $('bar-speed').querySelectorAll('[data-speed]').forEach(b =>
+        b.classList.toggle('on', +b.dataset.speed === s.speed));
     const cl = Math.round(cleanliness());
     const clean = $('bar-clean');
     clean.textContent = '🧹 ' + cl + '%';

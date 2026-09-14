@@ -68,6 +68,8 @@ const TRAY_Y = { centrifuge: 0.68 };
 // sync(); zero always means shut.
 const HINGE_OPEN = { centrifuge: -Math.PI / 2, cold: -1.15 };   // the lid stops bolt upright, never past it
 const HINGE_SPEED = 6;
+const ROOM_WALL_H = 0.85;      // lab rooms: tall enough to read as sealed
+const BREAK_WALL_H = 0.3;      // break room: low enough to see over — see _rebuildRoomWalls()
 // How dark a machine gets at zero condition — dull and grimy, still readable as itself.
 const SHADE_MIN = 0.5;
 const DIR4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
@@ -82,6 +84,15 @@ const BAR_Y = {
     firealarm: 1.75, door: 1.1, airlock: 1.1
 };
 
+// Frees the GPU-side buffers behind a discarded subtree. three.js doesn't do this on remove().
+function disposeTree(root) {
+    root.traverse(o => {
+        if (!o.isMesh) return;
+        o.geometry && o.geometry.dispose();
+        if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+        else o.material && o.material.dispose();
+    });
+}
 function lmat(c, e = {}) { return new THREE.MeshLambertMaterial({ color: c, ...e }); }
 function box(w, h, d, c, e) { return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), lmat(c, e)); }
 // Takes the same optional material extras as box() — without them every cyl() asking for
@@ -409,9 +420,18 @@ class LabScene {
         }
         this.roomWalls = new THREE.Group();
         this.scene.add(this.roomWalls);
-        const H = 0.85;
         for (const [kind, tiles] of areas) {
             const style = ROOM_STYLE[kind] || ROOM_STYLE.sterile;
+            // The break room is walled at knee height instead of the full 0.85 the lab rooms get.
+            // It's the one room whose whole appeal is watching what happens inside — staff milling
+            // about, queuing at the coffee machine, complaining — and full-height partitions hid
+            // exactly that from the two camera angles that look at its near side.
+            //
+            // Lowered rather than removed: the doorway in this wall is the only way in, and the
+            // nav grid blocks these same edges. Deleting the wall outright would leave staff
+            // walking the long way round a boundary that isn't drawn any more, which is precisely
+            // the "they walk through the break room wall" complaint in reverse.
+            const H = kind === 'break' ? BREAK_WALL_H : ROOM_WALL_H;
             const doors = kind === 'break' ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
             for (const key of tiles) {
                 const [tx, tz] = key.split(',').map(Number);
@@ -952,8 +972,16 @@ class LabScene {
             }
             const grille = box(0.5, 0.5, 0.02, 0x23282d); grille.position.set(0, 1.05, 0.365); g.add(grille);
         } else if (e.type === 'analysisdesk') {
-            const top = box(0.92, 0.08, 0.62, col); top.position.y = 0.5; g.add(top);
-            for (const [x, z] of [[.38, .24], [-.38, .24], [.38, -.24], [-.38, -.24]]) {
+            // Sized against the wall, not against the tile. A tile is 1.0 across, but a wall
+            // segment is 0.32 thick and straddles the tile boundary, so it eats the outer 0.16 of
+            // any tile it borders — the usable interior is really ±0.34. This desk was the widest
+            // 1×1 in the catalogue (±0.46) with its legs at ±0.41, so stood against a wall the far
+            // edge and two whole legs were swallowed by it. The legs now sit at ±0.30 (outer edge
+            // 0.33) so they always clear, and the top is brought in to the same ±0.42 as the Lab
+            // Bench — its overhanging edge just touches the wall, which is how a desk pushed
+            // against one should look anyway.
+            const top = box(0.84, 0.08, 0.62, col); top.position.y = 0.5; g.add(top);
+            for (const [x, z] of [[.30, .24], [-.30, .24], [.30, -.24], [-.30, -.24]]) {
                 const l = box(0.06, 0.46, 0.06, 0x8a9196); l.position.set(x, 0.23, z); g.add(l);
             }
             const stand = box(0.08, 0.12, 0.08, 0x6b7075); stand.position.set(-0.08, 0.6, -0.18); g.add(stand);
@@ -961,8 +989,8 @@ class LabScene {
             const screen = box(0.38, 0.24, 0.02, 0x35d0ff, { transparent: true, opacity: 0.85 });
             screen.position.set(-0.08, 0.81, -0.14); screen.userData.spin = true; g.add(screen);
             const keys = box(0.34, 0.03, 0.14, 0xdfe3e5); keys.position.set(-0.08, 0.55, 0.06); g.add(keys);
-            const paper = box(0.18, 0.012, 0.22, 0xf4ede0); paper.position.set(0.3, 0.55, 0.02); g.add(paper);
-            const mug = cyl(0.05, 0.05, 0.1, 8, 0xd88a5a); mug.position.set(0.34, 0.59, -0.2); g.add(mug);
+            const paper = box(0.18, 0.012, 0.22, 0xf4ede0); paper.position.set(0.26, 0.55, 0.02); g.add(paper);
+            const mug = cyl(0.05, 0.05, 0.1, 8, 0xd88a5a); mug.position.set(0.3, 0.59, -0.2); g.add(mug);
         } else if (e.type === 'door' || e.type === 'airlock') {
             // Stands in the wall line on the side it faces, so it reads as a gap in the partition
             // rather than a cupboard in the middle of the floor. An airlock is two leaves with a
@@ -1012,6 +1040,82 @@ class LabScene {
             const lamp = cyl(0.055, 0.045, 0.06, 8, 0xe0454a, { transparent: true, opacity: 0.95 });
             lamp.position.set(0, y - 0.19, zFace); lamp.visible = false;
             lamp.userData.alarmLamp = true; g.add(lamp);
+        } else if (e.type === 'fridge' || e.type === 'freezer') {
+            // The cabinet stops short of the door, leaving a shallow recess with lit shelves and
+            // vials in it. A solid block would have shown a blank wall behind the open door —
+            // there has to be somewhere for the door to reveal.
+            const bodyH = 1.3 + (fh - 1) * 0.15;
+            const zDoor = fh / 2 - 0.14, RECESS = 0.18;
+            const back = -(fh / 2 - 0.1), front = zDoor - RECESS;
+            const body = box(fw - 0.2, bodyH, front - back, col);
+            body.position.set(0, bodyH / 2, (front + back) / 2); g.add(body);
+            // Everything in the recess is kept inside the area the shut door covers, or you'd see
+            // shelves poking out around its edges with the fridge closed.
+            const dwF = fw - 0.34, doorH = bodyH - 0.4;
+            const inW = dwF - 0.08, inTop = bodyH / 2 + doorH / 2 - 0.05, inBot = bodyH / 2 - doorH / 2 + 0.05;
+            const inner = box(inW, inTop - inBot, 0.03, e.type === 'freezer' ? 0xbfe0ef : 0xe8f1f5);
+            inner.position.set(0, (inTop + inBot) / 2, front + 0.02); g.add(inner);
+            const chill = box(inW - 0.05, inTop - inBot - 0.05, 0.02, e.type === 'freezer' ? 0x8fd3f0 : 0xcfe8f2, { transparent: true, opacity: 0.45 });
+            chill.position.set(0, (inTop + inBot) / 2, front + 0.05); g.add(chill);
+            // Frame around the opening. The recess is a full-width gap in the front of the
+            // cabinet, so with the door shut you could still see into it over the door's top edge
+            // from this camera angle — these panels close everything except the doorway itself.
+            const frameW = (fw - 0.2 - dwF) / 2, zMid = (front + zDoor) / 2;
+            const lintelH = bodyH - (bodyH / 2 + doorH / 2);
+            if (lintelH > 0.01) { const m = box(fw - 0.2, lintelH, RECESS, col); m.position.set(0, bodyH - lintelH / 2, zMid); g.add(m); }
+            const sillH = bodyH / 2 - doorH / 2;
+            if (sillH > 0.01) { const m = box(fw - 0.2, sillH, RECESS, col); m.position.set(0, sillH / 2, zMid); g.add(m); }
+            if (frameW > 0.01) for (const sx of [-1, 1]) {
+                const m = box(frameW, doorH, RECESS, col);
+                m.position.set(sx * (dwF + frameW) / 2, bodyH / 2, zMid); g.add(m);
+            }
+            const VIAL = [0xe0555f, 0x77c97b, 0x5b8de8, 0xf1d34a];
+            for (let i = 0; i < 3; i++) {
+                const y = inBot + 0.08 + i * (inTop - inBot - 0.2) / 2;
+                const shelf = box(inW - 0.04, 0.03, RECESS - 0.06, 0x9aa2a8);
+                shelf.position.set(0, y, front + RECESS / 2); g.add(shelf);
+                for (let k = 0; k < 3; k++) {
+                    const vial = box(0.06, 0.12, 0.06, VIAL[(i * 3 + k) % VIAL.length]);
+                    vial.position.set(-(inW - 0.16) / 2 + k * (inW - 0.16) / 2, y + 0.075, front + RECESS / 2); g.add(vial);
+                }
+            }
+            // The door hangs off a hinge post down its left edge so it swings out of the way while
+            // a scientist is actually shelving something, instead of being a painted-on panel.
+            const dw = fw - 0.34;
+            const hinge = new THREE.Group();
+            hinge.position.set(-dw / 2, body.position.y, fh / 2 - 0.14);
+            hinge.userData.hingeAxis = 'y';
+            hinge.userData.hingeOpen = HINGE_OPEN.cold;
+            hinge.userData.hingeTarget = 0;                  // starts shut
+            g.add(hinge); g.userData.hinge = hinge;
+            const door = box(dw, bodyH - 0.4, 0.06, 0xffffff); door.position.set(dw / 2, 0, 0); hinge.add(door);
+            const h2 = box(0.06, 0.34, 0.06, 0x8a9196); h2.position.set(dw - 0.07, 0, 0.04); hinge.add(h2);
+            const fr = box(0.5, 0.12, 0.05, e.type === 'freezer' ? 0x2fa8d8 : 0x9fd6e6);
+            fr.position.set(dw / 2, bodyH - 0.2 - body.position.y, 0); hinge.add(fr);
+        } else if (e.type === 'mopcloset') {
+            // Broom and bucket used to sit far enough forward (and the tilted broom's swing far
+            // enough) that both poked out through the closet's own front face instead of reading
+            // as "propped in front of it". Body is a touch shallower and both props sit clearly
+            // forward of its face now, with an unambiguous gap instead of a clipped seam.
+            const body = box(0.68, 1.2, 0.58, col); body.position.y = 0.66; g.add(body);   // half-depth 0.29
+            const handle = box(0.045, 0.82, 0.045, 0x6b4a2a); handle.position.set(0.2, 0.85, 0.42); handle.rotation.x = -0.12; g.add(handle);
+            const bucket = cyl(0.15, 0.13, 0.19, 8, 0xf0c040); bucket.position.set(-0.2, 0.235, 0.46); g.add(bucket);
+        } else if (e.type === 'sink') {
+            // The basin used to sit at the same height as the counter (top faces exactly
+            // coincident, overlapping footprints) — a textbook top-down z-fight. It's now
+            // properly recessed below the counter surface, like a real inset basin, with a
+            // visible rim gap instead of a shared plane.
+            const counterTop = 0.55;
+            const counter = box(0.85, 0.1, 0.6, 0xd8dde1); counter.position.y = counterTop - 0.05; g.add(counter);
+            for (const [x, z] of [[.36, .24], [-.36, .24], [.36, -.24], [-.36, -.24]]) {
+                const l = box(0.07, 0.46, 0.07, 0x8a9196); l.position.set(x, 0.24, z); g.add(l);
+            }
+            const basinTop = counterTop - 0.09;
+            const basin = box(0.55, 0.12, 0.36, col); basin.position.y = basinTop - 0.06; g.add(basin);
+            const faucet = box(0.06, 0.32, 0.06, 0x9aa2a8); faucet.position.set(0, 0.7, -0.22); g.add(faucet);
+            const spout = box(0.06, 0.06, 0.2, 0x9aa2a8); spout.position.set(0, 0.85, -0.13); g.add(spout);
+            const drip = box(0.05, 0.05, 0.05, 0x8be0f0, { transparent: true, opacity: 0.85 });
+            drip.position.set(0, basinTop + 0.02, -0.05); g.add(drip);
         } else if (e.type === 'scale') {
             const base = box(0.6, 0.1, 0.5, col); base.position.y = 0.35; g.add(base);
             for (const [x, z] of [[.22, .18], [-.22, .18], [.22, -.18], [-.22, -.18]]) {
@@ -1366,6 +1470,23 @@ class LabScene {
         // through walls on longer walks (rather than tracking the tile-by-tile legal path). Scaling
         // the catch-up rate by speed too keeps the render's lag roughly constant at any speed.
         const a = 1 - Math.exp(-LERP_K * Math.min(dt, 0.1) * (state.speed || 1));
+
+        // Every mesh map below is keyed by entity id — but an id is only unique *within one game*.
+        // newGame() and loadSave() both reset the id counter, so the id that was a Lab Bench a
+        // moment ago is a Fridge in the new state, and _reconcile() would happily reuse the old
+        // mesh for it: press New mid-game and the lab came back drawn with the previous game's
+        // models until the page was reloaded. A fresh state object means none of the cached meshes
+        // can be trusted, so drop the lot and let them rebuild from scratch.
+        if (this._stateRef !== state) {
+            this._stateRef = state;
+            for (const map of [this.equipMeshes, this.sampleMeshes, this.staffMeshes, this.visitorMeshes]) {
+                for (const mesh of map.values()) { this.scene.remove(mesh); disposeTree(mesh); }
+                map.clear();
+            }
+            for (const [k, m] of this.dirtMeshes) { this.scene.remove(m); disposeTree(m); }
+            this.dirtMeshes.clear();
+            this._zonesKey = null; this._roomsKey = null;      // force the floor to repaint too
+        }
 
         this._updateFloor(state);
 
