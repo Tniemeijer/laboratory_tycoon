@@ -10,6 +10,8 @@ import {
     DISINFECT_FEE, FIRE_BRIGADE_FEE
 } from '../game.js';
 import { BUILDERS, wireMenu, setToolHandler } from './menus.js';
+import { renderTutorial } from './tutorial.js';
+import { renderTasks } from './tasks.js';
 
 const $ = (id) => document.getElementById(id);
 let openMenu = null;
@@ -47,7 +49,7 @@ export function initUI() {
     $('cam-rotate-left').addEventListener('click', () => G.scene.rotateView(-1));
     $('cam-rotate-right').addEventListener('click', () => G.scene.rotateView(1));
 
-    // Stow away the menu row + pause/speed/new on request — handy on a small screen where the
+    // Stow away the menu row + pause/speed/new on request. Handy on a small screen where the
     // full bar eats a lot of vertical space. Remembered across sessions.
     const BAR_COLLAPSE_KEY = 'labTycoonBarCollapsed';
     const barExtra = $('bar-extra'), barToggle = $('bar-toggle');
@@ -130,7 +132,7 @@ function rotateHotkey() {
 function pickUpForMove(e) {
     moveId = e.id;
     G.ghostRot = e.rot;          // carry on from however it's currently facing
-    G.onToast(`Moving ${BUILD[e.type].name} — click its new spot`);
+    G.onToast(`Moving ${BUILD[e.type].name}. Click its new spot`);
     hint();
     refreshGhost();
 }
@@ -154,10 +156,10 @@ function hint() {
         pill.hidden = moveId == null;
     }
     else if (BUILD[G.tool].room) {
-        h.textContent = `Laying ${BUILD[G.tool].name} — keep clicking tiles to extend it${paintCount ? ` (${paintCount} laid)` : ''} · Esc when done`;
+        h.textContent = `Laying ${BUILD[G.tool].name}. Keep clicking tiles to extend it${paintCount ? ` (${paintCount} laid)` : ''} · Esc when done`;
         pill.hidden = true;                                  // floor has no orientation to set
     }
-    else { h.textContent = `Placing ${BUILD[G.tool].name} — click a tile · Esc to cancel`; pill.hidden = false; }
+    else { h.textContent = `Placing ${BUILD[G.tool].name}. Click a tile · Esc to cancel`; pill.hidden = false; }
 }
 function refreshGhost() {
     const ht = G.scene.hoverTile;
@@ -193,7 +195,7 @@ export const sceneHandlers = {
             // machine you didn't mean to. Room floor is the opposite case: a room is laid a tile
             // at a time and is usually several tiles, so the tool stays live and you paint it on,
             // Esc (or picking something else) when you're done. Same reasoning as a tile brush in
-            // any level editor — going back to the Build menu between every tile is the whole
+            // any level editor. Going back to the Build menu between every tile is the whole
             // complaint.
             const painting = !!BUILD[G.tool].room;
             const placed = placeEquipment(G.tool, tx, tz, G.ghostRot);
@@ -210,12 +212,12 @@ export const sceneHandlers = {
         const room = roomAt(tx, tz);
         if (!room) return;
         if (G.tool === 'demolish') demolish(room.id);
-        else G.onToast(`${BUILD[room.type].name} — ${BUILD[room.type].desc.split('.')[0]}.`);
+        else G.onToast(`${BUILD[room.type].name}, ${BUILD[room.type].desc.split('.')[0]}.`);
     },
     onEquipmentClick(id) {
         if (G.tool === 'move') {
             if (moveId == null) { const e = G.state.equipment.find(x => x.id === id); if (e) pickUpForMove(e); }
-            else G.onToast('There\'s already something there — drop it on clear floor', true);
+            else G.onToast('There\'s already something there. Drop it on clear floor', true);
         }
         else if (G.tool === 'demolish') demolish(id);
         else if (G.tool === 'rotate') rotateEquipment(id);
@@ -224,13 +226,13 @@ export const sceneHandlers = {
             if (e) {
                 const b = BUILD[e.type];
                 let use;
-                if (e.broken) use = 'BROKEN — needs a mechanic';
+                if (e.broken) use = 'BROKEN. Needs a mechanic';
                 else if (!(b.caps || []).length) use = b.slots ? ((e.processing || []).length || e.reserved ? 'in use' : 'free') : b.desc;
                 else {
                     const staged = (e.staged || []).length, running = (e.processing || []).length;
                     use = `${running ? `running (${running})` : 'idle'}${staged ? `, ${staged} staged` : ''} · ${Math.round(e.condition ?? 100)}% condition`;
                 }
-                G.onToast(`${b.name} — ${use}`);
+                G.onToast(`${b.name}, ${use}`);
             }
         }
     },
@@ -250,6 +252,9 @@ function highlightTabs() {
 function renderDropdown() {
     const dd = $('dropdown');
     const content = $('dropdown-content');
+    // Lets CSS get the tutorial panel out of the way on a phone, where an open menu covers
+    // essentially the whole screen and there is nowhere for both to live.
+    document.body.classList.toggle('menu-open', !!openMenu);
     if (!openMenu) { dd.hidden = true; content.innerHTML = ''; delete dd.dataset.menu; return; }
     dd.hidden = false;
     // Set before measuring below — Build styles itself wider, and offsetWidth has to see that
@@ -278,7 +283,7 @@ export function render(force) {
     $('bar-rep').innerHTML = `${'★'.repeat(lv)}<span class="dim">${'★'.repeat(5 - lv)}</span> ${s.reputation}${next ? `<span class="dim">/${next}</span>` : ''}`;
     $('bar-day').textContent = 'Day ' + s.day;
     $('bar-dayfill').style.width = (s.dayFrac * 100).toFixed(1) + '%';
-    // Icon is drawn in CSS (see #bar-pause) — a glyph here would be replaced by the system emoji
+    // Icon is drawn in CSS (see #bar-pause). A glyph here would be replaced by the system emoji
     // font on mobile. `.playing` means the game is paused, so the button offers to resume.
     $('bar-pause').classList.toggle('playing', s.paused);
     $('bar-speed').querySelectorAll('[data-speed]').forEach(b =>
@@ -289,6 +294,8 @@ export function render(force) {
     clean.className = 'stat ' + (cl < 40 ? 'bad' : cl < 70 ? 'mid' : 'good');
 
     renderAlerts(s);
+    renderTasks();
+    renderTutorial();
 
     if (force || s.uiRev !== lastRev) {
         lastRev = s.uiRev;
@@ -317,29 +324,29 @@ function renderAlerts(s) {
     if ((s.fires || []).length) {
         const n = s.fires.length;
         const eta = s.brigadeEta != null ? Math.max(0, Math.ceil(s.brigadeEta)) : null;
-        let body = `<b>🔥 FIRE</b> — ${n} machine${n > 1 ? 's' : ''} alight. It spreads, and anyone stood near it can be killed.`;
+        let body = `<b>🔥 FIRE</b>, ${n} machine${n > 1 ? 's' : ''} alight. It spreads, and anyone stood near it can be killed.`;
         const btns = [];
         if (!s.evacuating) btns.push('<button class="mini" data-evac>Evacuate the building</button>');
         else body += ' <b>Evacuating.</b>';
         if (fireCrew) body += ` Fire crew is on the floor working through them.`;
-        else if (eta == null) btns.push(`<button class="mini" data-brigade>Call the fire brigade — $${FIRE_BRIGADE_FEE.toLocaleString()}</button>`);
+        else if (eta == null) btns.push(`<button class="mini" data-brigade>Call the fire brigade, $${FIRE_BRIGADE_FEE.toLocaleString()}</button>`);
         else body += ` Brigade arriving in ${eta}s.`;
         items.push({ cls: 'alert fire', html: body + (btns.length ? `<div class="row">${btns.join('')}</div>` : '') });
     }
 
     if (s.outbreak) {
         const crew = s.outbreak.crewDay;
-        let body = `<b>☣ CONTAINMENT BREACH</b> — the ${s.outbreak.source} let something out on Day ${s.outbreak.day}. The room is sealed and nothing in it can be used.`;
+        let body = `<b>☣ CONTAINMENT BREACH</b>. The ${s.outbreak.source} let something out on Day ${s.outbreak.day}. The room is sealed and nothing in it can be used.`;
         body += cleanCrew ? ` <b>Crew is in there fogging it now.</b>`
               : crew != null ? ` Disinfection crew due <b>Day ${crew}</b>.`
-              : `<div class="row"><button class="mini" data-disinfect>Call a disinfection crew — $${DISINFECT_FEE.toLocaleString()}, arrives Day ${s.day + 1}</button></div>`;
+              : `<div class="row"><button class="mini" data-disinfect>Call a disinfection crew, $${DISINFECT_FEE.toLocaleString()}, arrives Day ${s.day + 1}</button></div>`;
         items.push({ cls: 'alert', html: body });
     }
 
     for (const l of (s.lawsuits || [])) {
         items.push({ cls: 'alert', html:
-            `<b>⚖ CLAIM</b> — ${l.name}'s family are suing over the ${l.cause} for $${l.claim.toLocaleString()}. Answer by <b>Day ${l.deadline}</b> or it's heard without you.` +
-            `<div class="row"><button class="mini" data-settle="${l.id}">Settle — $${settlementOf(l).toLocaleString()}</button>` +
+            `<b>⚖ CLAIM</b>, ${l.name}'s family are suing over the ${l.cause} for $${l.claim.toLocaleString()}. Answer by <b>Day ${l.deadline}</b> or it's heard without you.` +
+            `<div class="row"><button class="mini" data-settle="${l.id}">Settle, $${settlementOf(l).toLocaleString()}</button>` +
             `<button class="mini" data-fight="${l.id}">Fight it</button></div>` });
     }
 

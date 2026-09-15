@@ -4,16 +4,17 @@
 
 import {
     UPGRADES, ZONES, INGREDIENTS, SUPPLIES, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_MAX, LOAN_BORROW_STEP, LOAN_REPAY_STEP,
-    PRICE_DRIFT, PRICE_PULL, PRICE_MIN, PRICE_MAX, ORDER_LEAD_DAYS, STOCK_BASE_CAPACITY, STOCK_PER_UPGRADE,
-    WATER_ITEM
+    PRICE_DRIFT, PRICE_PULL, PRICE_MIN, PRICE_MAX, ORDER_LEAD_DAYS, STOCK_TIER_CAPACITY,
+    CRATE_UNITS, WATER_ITEM
 } from '../data.js';
 import { G, nid, upgradeCost, utilityBreakdown, bumpNav, dirtyUI } from '../core.js';
+import { queueTile, tileToWorld, annexLevel } from '../grid.js';
 
 export function buyUpgrade(k) {
     const s = G.state, u = UPGRADES[k];
     if (s.upgrades[k] >= u.max) return;
     const cost = upgradeCost(k);
-    if (s.money < cost) return G.onToast('Not enough money', true);
+    if (s.money < cost) return G.onToast(G.noFunds ? G.noFunds(u.name) : 'Not enough money', true);
     s.money -= cost; s.upgrades[k]++;
     if (k === 'staff') bumpNav();     // the break room grows, so its walls and floor move
     G.onToast(`${u.name} → Lv ${s.upgrades[k]}`);
@@ -25,7 +26,7 @@ export function buyZone(id) {
     const z = ZONES.find(x => x.id === id);
     if (!z) return;
     if (s.ownedZones.includes(id)) return;
-    if (s.money < z.cost) return G.onToast('Not enough money to expand here', true);
+    if (s.money < z.cost) return G.onToast(G.noFunds ? G.noFunds(z.name) : 'Not enough money', true);
     s.money -= z.cost;
     s.ownedZones.push(id);
     bumpNav();
@@ -37,7 +38,7 @@ export function buyZone(id) {
 export function stockItem(key) { return key === 'water' ? WATER_ITEM : (INGREDIENTS[key] || SUPPLIES[key]); }
 export function isSupply(key) { return !!SUPPLIES[key]; }
 function bin(key) { return isSupply(key) ? G.state.supplies : G.state.ingredients; }
-// Water lives in the lab's tank rather than on a shelf — a Sink can fill it endlessly, so counting
+// Water lives in the lab's tank rather than on a shelf. A Sink can fill it endlessly, so counting
 // it against stockroom space would be odd.
 export function stockCount(key) { return key === 'water' ? G.state.water : (bin(key)[key] || 0); }
 export function addStock(key, qty) {
@@ -51,7 +52,10 @@ export function takeStock(key, qty = 1) {
     return true;
 }
 
-export function stockCapacity() { return STOCK_BASE_CAPACITY + STOCK_PER_UPGRADE * (G.state.upgrades.storage || 0); }
+// Shelf space is whatever the stockroom annex has grown to. See STOCK_TIER_CAPACITY and the
+// 'stock' annex in grid.js. There's always one, so an order always has somewhere to go; what
+// changes with the upgrade is how much of it you can hold.
+export function stockCapacity() { return STOCK_TIER_CAPACITY[annexLevel(G.state, 'stock')]; }
 // What's on the shelf plus what's already on its way — an order reserves its space the moment it's
 // placed, otherwise you could order round a full stockroom and have nowhere to put the delivery.
 export function stockUsed() {
@@ -60,6 +64,9 @@ export function stockUsed() {
     for (const k of Object.keys(INGREDIENTS)) n += s.ingredients[k] || 0;
     for (const k of Object.keys(SUPPLIES)) n += s.supplies[k] || 0;
     for (const o of s.orders || []) if (o.key !== 'water') n += o.qty;   // water goes to the tank, not a shelf
+    // Crates sitting at the door are bought and paid for and have nowhere else to go, so their
+    // space stays reserved until somebody actually shelves them.
+    for (const c of s.deliveries || []) n += c.qty;
     return n;
 }
 export function stockFree() { return Math.max(0, stockCapacity() - stockUsed()); }
@@ -91,23 +98,41 @@ export function driftPrices() {
 export function orderStock(key, qty = 10) {
     const s = G.state, item = stockItem(key);
     if (!item) return;
-    if (key !== 'water' && qty > stockFree()) return G.onToast(`Stockroom is full — ${stockFree()} units of space left`, true);
+    if (key !== 'water' && qty > stockFree()) return G.onToast(`Stockroom is full, ${stockFree()} units of space left`, true);
     const cost = unitPrice(key) * qty;
-    if (s.money < cost) return G.onToast('Not enough money', true);
+    if (s.money < cost) return G.onToast(G.noFunds ? G.noFunds(item.name) : 'Not enough money', true);
     s.money -= cost;
     s.orders.push({ id: nid(), key, qty, day: s.day + ORDER_LEAD_DAYS });
-    G.onToast(`Ordered ${qty}× ${item.name} — $${cost.toLocaleString()}, arrives Day ${s.day + ORDER_LEAD_DAYS}`);
+    G.onToast(`Ordered ${qty}× ${item.name}, $${cost.toLocaleString()}, arrives Day ${s.day + ORDER_LEAD_DAYS}`);
     dirtyUI();
 }
-// Called on the day rollover: anything due turns up on the shelf.
+// Called on the day rollover: anything due is dropped at the front door as crates. It does NOT
+// land on the shelf. A scientist has to carry each crate to a Stockroom first (see staff.js's
+// crate job), and until they do none of it can be used by a run.
 export function deliverOrders() {
     const s = G.state;
     const due = (s.orders || []).filter(o => o.day <= s.day);
     if (!due.length) return;
     s.orders = s.orders.filter(o => o.day > s.day);
-    for (const o of due) addStock(o.key, o.qty);
+    s.deliveries ||= [];
+    let crates = 0;
+    for (const o of due) {
+        // Water is pumped straight into the tank — there's nothing to shelve.
+        if (o.key === 'water') { addStock(o.key, o.qty); continue; }
+        for (let left = o.qty; left > 0; left -= CRATE_UNITS) {
+            const qty = Math.min(CRATE_UNITS, left);
+            const [tx, tz] = queueTile(s.deliveries.length + crates);
+            const w = tileToWorld(tx, tz);
+            s.deliveries.push({ id: nid(), key: o.key, qty, wx: w.x, wz: w.z, claimedBy: null });
+            crates++;
+        }
+    }
     const names = due.map(o => `${o.qty}× ${stockItem(o.key).name}`).join(', ');
-    G.onToast(`Delivery arrived: ${names}`);
+    if (crates) {
+        G.onToast(`Delivery at the door: ${names}, ${crates} crate${crates > 1 ? 's' : ''} to be put away`);
+    } else {
+        G.onToast(`Delivery arrived: ${names}`);
+    }
     dirtyUI();
 }
 
@@ -125,7 +150,7 @@ export function applyDailyUtilities() {
 
 // Servicing the debt: every few days the lender takes its interest in cash and the principal is
 // left exactly where it was. Nothing compounds, so a loan you can afford to service is a steady
-// cost rather than a hole that quietly deepens — paying it down is about clearing the drain, not
+// cost rather than a hole that quietly deepens. Paying it down is about clearing the drain, not
 // outrunning it. Checked on each day rollover; only actually bills on the due days.
 export function interestDue() {
     const s = G.state;

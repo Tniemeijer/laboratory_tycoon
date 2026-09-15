@@ -2,16 +2,16 @@
 // Owns the save file, the day/tick loop, and equipment placement. Gameplay systems live in
 // ./systems/*; this module wires them together and re-exports the public API the UI/scene use.
 
-import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, ROOM_DOOR_REQ, SUITED_ROOM_KINDS, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL } from './data.js';
+import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, ROOM_DOOR_REQ, SUITED_ROOM_KINDS, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL } from './data.js';
 import {
     G, nid, resetIdCounter, currentIdCounter, dirtyUI, bumpNav, nav,
     labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown
 } from './core.js';
 import { canPlace as gridCanPlace, tileToWorld, sealedRooms, wallFacing, footTiles } from './grid.js';
-import { refillOffers, acceptContract as acceptContractSys, failContract, checkContractArrivals } from './systems/contracts.js';
+import { refillOffers, acceptContract as acceptContractSys, failContract, cancelContract as cancelContractSys, cancelCost, checkContractArrivals } from './systems/contracts.js';
 import { spawnSample, abandonSample, updateSamples } from './systems/samples.js';
-import { updateStaff, hireStaff, toggleStaffCap } from './systems/staff.js';
+import { updateStaff, hireStaff, toggleStaffCap, fireStaff } from './systems/staff.js';
 import { buyUpgrade, buyZone, orderStock, driftPrices, deliverOrders, unitPrice, priceTrend, interestDue, nextInterestDay,
          stockCapacity, stockUsed, stockFree, stockCount, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan } from './systems/economy.js';
 import { recomputeGrime } from './systems/dirt.js';
@@ -30,18 +30,20 @@ const SAVE_SCHEMA = 5;
 // ---------- re-exports (the public API used by ui.js / threeScene.js) ----------
 export {
     BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL,
-    WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD,
+    WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, ROOM_DOOR_REQ,
     LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP, SUITED_ROOM_KINDS,
     G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt, nav,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown,
-    hireStaff, toggleStaffCap, buyUpgrade, buyZone, borrowLoan, repayLoan,
+    hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, borrowLoan, repayLoan,
     orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
     interestDue, nextInterestDay, callMechanic, mechanicQuote, mechanicOnSite,
+    cancelCost,
     evacuate, endEvacuation, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
     alarmReliability, isBurning, isQuarantined,
     DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS
 };
 export function acceptContract(id) { acceptContractSys(id, spawnSample); }
+export function cancelContract(id) { cancelContractSys(id, abandonSample); }
 
 // ---------- fresh state ----------
 function fresh() {
@@ -55,7 +57,6 @@ function fresh() {
         paused: false,
         speed: 1,
         hireCost: 500,
-        autoPrep: true,
         coldStore: true,
         equipment: [],
         staff: [],
@@ -64,8 +65,12 @@ function fresh() {
         offers: [],
         reagents: [],
         prepping: {},
-        ingredients: { salineSalt: 6, solventBase: 6, bufferMix: 6 },
-        supplies: { disposable: 20, slide: 8 },
+        brewOrders: { saline: 0, solvent: 0, buffer: 0 },   // batches the player has asked for
+        deliveries: [],             // crates dropped at the door, waiting to be shelved
+        // 23 units all in — fits the door shelf (STOCK_BASE_CAPACITY) with room for a little more,
+        // and one batch's worth of each ingredient so the first brew order can actually be filled.
+        ingredients: { salineSalt: 3, solventBase: 3, bufferMix: 3 },
+        supplies: { disposable: 10, slide: 4 },
         prices: {},                 // per-item multiplier on list price, drifts daily
         prevPrices: {},
         orders: [],                 // placed today, delivered on `day`
@@ -77,15 +82,16 @@ function fresh() {
         contaminationCooldown: 0,
         lastBill: 0,
         mechanicDay: null,          // day a booked mechanic turns up, or null
-        fires: [],                  // [{ equipId, t, spreadT }] — everything currently alight
+        fires: [],                  // [{ equipId, t, spreadT }]. Everything currently alight
         evacuating: false,
         brigadeEta: null,           // seconds until the engine arrives, or null if none called
         outbreak: null,             // { tiles, day, crewDay, source } while a containment room is sealed
         lawsuits: [],
         visitors: [],               // people on site who aren't staff — see systems/visitors.js
         upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0 },
-        stats: { done: 0, failed: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0, fires: 0, outbreaks: 0, deaths: 0 },
+        stats: { done: 0, failed: 0, cancelled: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0, fires: 0, outbreaks: 0, deaths: 0, shelved: 0 },
         schema: SAVE_SCHEMA,
+        tutorial: { step: 0, done: false },   // guided first run — see ui/tutorial.js
         navVersion: 0,
         uiRev: 0,
         warns: {}
@@ -97,10 +103,21 @@ function fresh() {
 
 // ---------- placement ----------
 export function canPlace(type, tx, tz, rot, ignoreId) { return gridCanPlace(G.state, type, tx, tz, rot, ignoreId); }
-export function canAfford(type) { return G.state.money >= BUILD[type].cost; }
-export function isUnlocked(type) { return labLevel() >= BUILD[type].minLevel; }
+// One message for every "you can't afford this" case, because the answer is always the same and
+// most players won't think of it: the lender will usually extend you more. Says so explicitly,
+// and says the opposite just as plainly once you're maxed out, so it never sends you to the Lab
+// menu for a button that won't help.
+export function noFunds(what) {
+    const s = G.state;
+    const room = LOAN_MAX - s.loan;
+    if (room <= 0) return `Not enough money for ${what}, and the lender won't extend any further credit.`;
+    return `Not enough money for ${what}. The bank will lend you more, up to $${room.toLocaleString()} on top, under Lab.`;
+}
+G.noFunds = noFunds;    // hook so the systems modules can use it without importing this one
+export function canAfford(type) { return !!BUILD[type] && G.state.money >= BUILD[type].cost; }
+export function isUnlocked(type) { return !!BUILD[type] && labLevel() >= BUILD[type].minLevel; }
 
-// A room you lay with no door in it is legal — you're mid-build — but it's also completely inert
+// A room you lay with no door in it is legal — you're mid-build, but it's also completely inert
 // until a door goes in, and nothing else in the game would ever tell you. Checked after every
 // change to the floor plan rather than on a timer, so the warning lands on the action that caused
 // it and never nags afterwards.
@@ -109,13 +126,16 @@ function warnSealedRooms() {
     const sealed = sealedRooms(G.state);
     if (!sealed.length) return;
     const kinds = [...new Set(sealed.map(r => ROOM_KIND_NAME[r.kind] || r.kind))].join(' / ');
-    G.onToast(`${kinds}: no way in — place a ${ROOM_DOOR_REQ[sealed[0].kind] === 'airlock' ? 'Airlock' : 'Door'} on one of its tiles`, true);
+    G.onToast(`${kinds}: no way in. Place a ${ROOM_DOOR_REQ[sealed[0].kind] === 'airlock' ? 'Airlock' : 'Door'} on one of its tiles`, true);
 }
 
 export function placeEquipment(type, tx, tz, rot) {
     const s = G.state;
+    // A type this build doesn't know about is a caller bug. An old bookmark, a stale save, or a
+    // buildable that has since become an annex. Report it rather than throwing out of the tick.
+    if (!BUILD[type]) { console.warn('placeEquipment: unknown type', type); return false; }
     if (!isUnlocked(type)) { G.onToast(`Needs Lab Rating ${BUILD[type].minLevel}`, true); return false; }
-    if (!canAfford(type)) { G.onToast('Not enough money', true); return false; }
+    if (!canAfford(type)) { G.onToast(noFunds(BUILD[type].name), true); return false; }
     const chk = canPlace(type, tx, tz, rot);
     if (!chk.ok) { G.onToast(`Can't build here (${chk.why === 'unowned land' ? 'buy this plot first' : chk.why})`, true); return false; }
     s.money -= BUILD[type].cost;
@@ -133,7 +153,7 @@ export function placeEquipment(type, tx, tz, rot) {
     return true;
 }
 // Relocate a machine (or a room) that's already built, keeping everything it's holding. Free —
-// it's a reshuffle, not a purchase — and it deliberately doesn't care whether the machine is
+// it's a reshuffle, not a purchase, and it deliberately doesn't care whether the machine is
 // mid-run: the run ticks on regardless, it just finishes somewhere else.
 export function moveEquipment(id, tx, tz, rot) {
     const s = G.state;
@@ -143,7 +163,7 @@ export function moveEquipment(id, tx, tz, rot) {
     const chk = canPlace(e.type, tx, tz, r, e.id);       // ignoreId: it mustn't collide with itself
     if (!chk.ok) { G.onToast(`Can't move there (${chk.why === 'unowned land' ? 'buy this plot first' : chk.why})`, true); return false; }
     e.tx = tx; e.tz = tz; e.rot = BUILD[e.type].mount ? wallFacing(s, tx, tz, r) : r;
-    // Samples parked in its staging (or mid-run) travel with it — otherwise they'd pop back into
+    // Samples parked in its staging (or mid-run) travel with it. Otherwise they'd pop back into
     // existence at the machine's old spot the moment their run finished.
     const aboard = new Set([...(e.staged || []).map(x => x.sampleId),
                             ...(e.processing || []).flatMap(pp => pp.sampleIds || [pp.sampleId])]);
@@ -205,7 +225,16 @@ export function togglePause() { G.state.paused = !G.state.paused; dirtyUI(); }
 // from the button not registering. See the segmented control in index.html.
 export function setSpeed(n) { const s = G.state; if (s.speed === n) return; s.speed = n; dirtyUI(); }
 export function cycleSpeed() { const s = G.state; s.speed = s.speed === 1 ? 2 : s.speed === 2 ? 3 : 1; dirtyUI(); }
-export function toggleAutoPrep() { G.state.autoPrep = !G.state.autoPrep; dirtyUI(); }
+// Reagent batches are queued by the player; a free scientist takes the next one to a bench.
+export function orderBrew(type, delta = 1) {
+    const s = G.state;
+    if (!REAGENTS[type]) return;
+    const cur = s.brewOrders[type] || 0;
+    const next = Math.max(0, Math.min(BREW_QUEUE_MAX, cur + delta));
+    if (next === cur) return;
+    s.brewOrders[type] = next;
+    dirtyUI();
+}
 export function toggleColdStore() { G.state.coldStore = !G.state.coldStore; dirtyUI(); }
 
 // ---------- time ----------
@@ -261,6 +290,17 @@ function loadSave() {
         // forever with nobody left who was ever going to mop it.
         s.dirtClaims = {};
         s.prepping ||= {}; s.ingredients ||= { salineSalt: 0, solventBase: 0, bufferMix: 0 };
+        // Reagents are brewed to order now, and stock is delivered as crates that have to be
+        // carried in. An older save has neither field; it just starts with an empty order book
+        // and nothing waiting at the door.
+        s.brewOrders ||= { saline: 0, solvent: 0, buffer: 0 };
+        for (const k of ['saline', 'solvent', 'buffer']) if (s.brewOrders[k] == null) s.brewOrders[k] = 0;
+        s.deliveries ||= [];
+        delete s.autoPrep;
+        // Someone mid-game doesn't want to be walked through accepting their first contract, so a
+        // save from before the tutorial existed counts as having done it. They can replay it from
+        // the Help menu if they want.
+        s.tutorial ||= { step: 0, done: true };
         s.supplies ||= {}; s.prices ||= {}; s.prevPrices ||= {}; s.orders ||= [];
         s.water ||= 0;
         if (s.loan == null) s.loan = 0;   // pre-existing saves started debt-free under the old economy
@@ -296,7 +336,7 @@ function loadSave() {
         // Gated on the save's schema number, and it MUST be: there is no way to tell an old 2×2
         // room from a new 1×1 one by looking at it, because after the change they're the same
         // shape. An earlier version tried to infer it from the BUILD footprint and from a flag
-        // that was never actually written, which came out true for every room on every load — so
+        // that was never actually written, which came out true for every room on every load, so
         // each refresh quadrupled every room tile and added another airlock, compounding every
         // time the page was reloaded. A stored version number is the only honest answer.
         if ((s.schema || 0) < SAVE_SCHEMA) {
@@ -319,8 +359,8 @@ function loadSave() {
             console.warn('Dropped unrecognised equipment from save:', unknown.map(e => e.type));
         }
         // Self-heal: drop anything standing on a tile it could never have been placed on in the
-        // first place. Placement keeps three independent layers — room floor, wall fittings
-        // (doors and mounts), and machines — and within a layer two things can never share a tile,
+        // first place. Placement keeps three independent layers. Room floor, wall fittings
+        // (doors and mounts), and machines, and within a layer two things can never share a tile,
         // so a duplicate here is corruption rather than a legal lab, whatever produced it. Cheap,
         // and it means a save mangled by the migration bug above tidies itself up on next load
         // instead of needing a fresh game.
@@ -340,7 +380,7 @@ function loadSave() {
             e.processing = []; e.reserved = 0; e.rot = e.rot || 0; e.staged = [];
             if (e.condition == null) e.condition = 100;
             e.broken = false;
-            // Same reasoning as the dirtClaims reset above — every worker's job is about to be
+            // Same reasoning as the dirtClaims reset above, every worker's job is about to be
             // wiped, so no equipment claim from the old save can still be backed by a live
             // worker. Left alone, a stale one would make findReadyBatchJob()/assignMechanicJob()
             // skip this equipment forever, since nothing would ever be left to clear it.

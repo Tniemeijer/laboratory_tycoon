@@ -8,7 +8,7 @@ import { removeFromStaging, stageSample } from './equipment.js';
 
 export function curStep(sm) { return PROTOCOLS[sm.proto].steps[sm.step]; }
 // A sample that's become a written report (or raw sequencing data) has nothing left in it to
-// spoil — see INERT_CAPS. Used both to exempt it from decay and to keep staff from shelving it.
+// spoil. See INERT_CAPS. Used both to exempt it from decay and to keep staff from shelving it.
 export function isInert(sm) { const st = curStep(sm); return !!st && INERT_CAPS.includes(st.cap); }
 
 export function spawnSample(proto, contractId) {
@@ -27,7 +27,7 @@ export function abandonSample(id) {
         if (!e.processing) continue;
         for (const p of e.processing) {
             // cold-storage entries still carry a lone sampleId; the batched protocol-step
-            // pipeline carries a sampleIds array — either shape can hold the abandoned sample.
+            // pipeline carries a sampleIds array, either shape can hold the abandoned sample.
             if (p.sampleId === id) { e.processing = e.processing.filter(x => x !== p); break; }
             if (p.sampleIds && p.sampleIds.includes(id)) {
                 p.sampleIds = p.sampleIds.filter(x => x !== id);
@@ -77,7 +77,7 @@ export function updateSamples(dt) {
 
     // Automatic hand-off: some stations take their input over the network rather than by hand (a
     // Server Rack picking reads straight off the sequencer). A sample waiting on one of those
-    // doesn't need a scientist to walk it over — it lands in staging on its own, as long as the
+    // doesn't need a scientist to walk it over. It lands in staging on its own, as long as the
     // station has room left in its next run. Nothing claimed by a worker gets pulled out from
     // under them.
     for (const sm of s.samples) {
@@ -98,7 +98,7 @@ export function updateSamples(dt) {
     const storedRate = coldDecayRate();
     for (const sm of s.samples.slice()) {           // snapshot: abandonSample() below mutates s.samples
         // Decay only bites before a sample is ever picked up (or while genuinely cold-stored,
-        // which decays slowly on its own schedule regardless of step) — once a scientist has it
+        // which decays slowly on its own schedule regardless of step), once a scientist has it
         // for a step, waiting for the *next* one is exempt, same as it always was. Letting every
         // later wait decay too turned batching's staging delays into a spoilage death spiral in
         // testing: a few samples stacked up mid-pipeline, a batch missed its window, replacements

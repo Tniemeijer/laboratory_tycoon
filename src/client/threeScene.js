@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { BUILD, ZONES, PROTOCOLS, COND_SLOW_THRESHOLD, SUITED_ROOM_KINDS } from './data.js';
 import {
-    GRID, BUILD_MAX_Z, BREAK_ROOM_MAX, breakRoom, breakRoomProps, roomAreas, roomDoorways, breakRoomDoorway,
+    GRID, BUILD_MAX_Z, breakRoom, breakRoomProps, roomAreas, roomDoorways, breakRoomDoorway,
+    ANNEX_KINDS, annexRect, annexProps, annexLevel, inAnnexFootprint,
     tileToWorld, footTiles, zoneAt, gateXRange, isShellWall
 } from './grid.js';
 
@@ -34,11 +35,11 @@ function sampleAppearance(sm) {
     const step = PROTOCOLS[sm.proto].steps[sm.step];
     return appearanceForCap(step ? step.cap : null);
 }
-// Real lab equipment is mostly steel/white/grey — samples and status lights carry the color instead.
+// Real lab equipment is mostly steel/white/grey. Samples and status lights carry the color instead.
 // The mop closet stays warm/wood-toned since it's furniture, not clinical equipment.
 const EQUIP_COLOR = {
     bench: 0xc4cdd2, preprobot: 0x4a5560, microscope: 0x585e63, centrifuge: 0xe8ebed, incubator: 0xd6dadd,
-    fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3,
+    fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3, stockroom: 0x9a7247,
     scale: 0xe8ebed, chromatograph: 0xdfe3e5, sequencer: 0xe4e9ec, door: 0xb8c2c6, airlock: 0xcfd8dd, serverrack: 0x3a4046, analysisdesk: 0xd8dde1, darkroom: 0x2a2e33, cleanroom: 0xeef3f4, firealarm: 0xb9c1c6,
     flowhood: 0xe8ebed, fumehood: 0xc9ced3
 };
@@ -49,7 +50,7 @@ const COFFEE_QUOTES = ["This coffee is terrible.", "Who finished the pot?!", "Is
 const RADIO_QUOTES = ["Who changed the station?!", "Not this song again...", "Who turned it up?!", "Put the jazz back on.", "Way too loud!", "Can we agree on ONE station?"];
 const LAB_QUOTES = ["Where are my goggles?", "Is it Friday yet?", "I mislabeled a tube...", "Who moved my clipboard?", "Five more minutes...", "This centrifuge is cursed.", "Did I turn off the burner?"];
 
-// Rooms (Cleanroom, Dark Room, the ML containment labs) are floor rather than furniture — they
+// Rooms (Cleanroom, Dark Room, the ML containment labs) are floor rather than furniture. They
 // render as a tinted patch of tiles ringed by partition walls, in the same style as the break
 // room, instead of as a model standing on the ground. That's not just cosmetic: a model would sit
 // between the cursor and the tile under it, and picking would hand back the room instead of the
@@ -59,9 +60,10 @@ const ROOM_STYLE = {
     dark:    { light: 0x3c434a, dark: 0x31383e, wall: 0x23282d, trim: 0x5b4a78 },
     sterile: { light: 0xfdfefe, dark: 0xeaf2f5, wall: 0xe8eef1, trim: 0xb8c2c6 },
     contain: { light: 0xdff0d8, dark: 0xcde4c4, wall: 0xcfe0c4, trim: 0x5f8f4a },
-    break:   { light: 0xe8d3ab, dark: 0xdcc294, wall: 0xc9ced3, trim: 0x97a1aa }
+    break:   { light: 0xe8d3ab, dark: 0xdcc294, wall: 0xc9ced3, trim: 0x97a1aa },
+    stock:   { light: 0xd9c9a6, dark: 0xcbb98f, wall: 0xb8a17d, trim: 0x8a7550 }
 };
-// Height of the sample tray per machine — the default sits just above a benchtop, but a
+// Height of the sample tray per machine. The default sits just above a benchtop, but a
 // centrifuge carries its samples down in the rotor well instead.
 const TRAY_Y = { centrifuge: 0.68 };
 // How far each moving part swings when open, in radians. Both ease toward their target in
@@ -69,18 +71,18 @@ const TRAY_Y = { centrifuge: 0.68 };
 const HINGE_OPEN = { centrifuge: -Math.PI / 2, cold: -1.15 };   // the lid stops bolt upright, never past it
 const HINGE_SPEED = 6;
 const ROOM_WALL_H = 0.85;      // lab rooms: tall enough to read as sealed
-const BREAK_WALL_H = 0.3;      // break room: low enough to see over — see _rebuildRoomWalls()
-// How dark a machine gets at zero condition — dull and grimy, still readable as itself.
+const BREAK_WALL_H = 0.3;      // break room: low enough to see over. See _rebuildRoomWalls()
+// How dark a machine gets at zero condition. Dull and grimy, still readable as itself.
 const SHADE_MIN = 0.5;
 const DIR4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
 const EMPTY_SET = new Set();
-const DOOR_PREF = [[0, 1], [1, 0], [-1, 0], [0, -1]];   // south first — that's where the floor traffic is
+const DOOR_PREF = [[0, 1], [1, 0], [-1, 0], [0, -1]];   // south first, that's where the floor traffic is
 
 // Height to float each type's progress bar at, clear of its own model.
 const BAR_Y = {
     bench: 0.85, preprobot: 1.62, microscope: 1.3, centrifuge: 0.95, incubator: 1.45,
     fridge: 1.5, freezer: 1.65, sink: 0.8, mopcloset: 1.45,
-    scale: 0.75, chromatograph: 1.35, sequencer: 1.95, serverrack: 1.6, analysisdesk: 1.15, flowhood: 1.35, fumehood: 1.55,
+    scale: 0.75, chromatograph: 1.35, sequencer: 1.95, serverrack: 1.6, analysisdesk: 1.15, flowhood: 1.35, fumehood: 1.55, stockroom: 1.55,
     firealarm: 1.75, door: 1.1, airlock: 1.1
 };
 
@@ -111,6 +113,11 @@ const SUIT_COLOR = 0xf0d878, SUIT_HOOD = 0xe8c84a;
 // Contractors, not staff — each trade its own unmistakable silhouette and palette, so you can
 // tell at a glance who has turned up without clicking anything.
 const VISITOR_COAT = 0xe07a2f, VISITOR_HAT = 0xe8ebed;          // mechanic: hi-vis, white hard hat
+// Contents chit on a delivery crate, so a stack of boxes is readable at a glance.
+const CRATE_TINT = {
+    disposable: 0xcfd8dd, slide: 0x9fd6e6, fluorlabel: 0xd98ad0, column: 0x8fd48f, flowcell: 0xf0c040,
+    salineSalt: 0xe8ebed, solventBase: 0xd88a5a, bufferMix: 0x8fb8e0
+};
 const FIRE_COAT = 0x2b3442, FIRE_BAND = 0xf5e14a, FIRE_HAT = 0xe8b21f;   // turnout kit, yellow helmet
 const CLEAN_SUIT = 0xf2f6f4, CLEAN_TRIM = 0x4fae7a, CLEAN_VISOR = 0x2b3d4a;
 
@@ -134,6 +141,7 @@ class LabScene {
         this.sampleMeshes = new Map();
         this.staffMeshes = new Map();
         this.visitorMeshes = new Map();
+        this.crateMeshes = new Map();
         this.dirtMeshes = new Map();
         this.zoneFences = new Map();
         this._zonesKey = null;
@@ -203,12 +211,12 @@ class LabScene {
 
         // RCT-style fixed compass rotation: free-dragging still feels responsive while it's
         // happening, but the instant you let go, the view snaps onto the nearest of the 4
-        // "corner" viewing angles (45°/135°/225°/315° — offset from the grid axes on purpose,
+        // "corner" viewing angles (45°/135°/225°/315°. Offset from the grid axes on purpose,
         // since looking straight down a row of tiles is exactly the degenerate, bad-looking
-        // angle this is meant to prevent). Tilt is untouched — only compass heading snaps.
+        // angle this is meant to prevent). Tilt is untouched, only compass heading snaps.
         this._azTween = null;
         // Anchors the snap grid to wherever the camera actually starts (a 45°-off-axis corner),
-        // rather than to 0 — rounding cur/STEP*STEP directly would snap to 0°/90°/180°/270°,
+        // rather than to 0. Rounding cur/STEP*STEP directly would snap to 0°/90°/180°/270°,
         // which are exactly the axis-aligned angles this whole feature exists to avoid.
         this._azBase = this.controls.getAzimuthalAngle();
         this.controls.addEventListener('start', () => { this._azTween = null; });
@@ -222,14 +230,14 @@ class LabScene {
     }
 
     _buildStaticWorld() {
-        // Generously oversized on purpose — at the zoomed-out/flat-tilt extremes a small ground
+        // Generously oversized on purpose, at the zoomed-out/flat-tilt extremes a small ground
         // plane runs out before the view does, showing the raw background color as a visible
         // "edge of the world" past the lawn.
         const ground = box(600, 0.4, 600, 0x232629);
         ground.position.y = -0.35;
         this.scene.add(ground);
 
-        // Floor only exists where a room does — the unclaimed corners of the square stay bare
+        // Floor only exists where a room does. The unclaimed corners of the square stay bare
         // lawn (the ground plane shows through), which is what gives the building its cross shape.
         this.floorTiles = [];
         const fg = new THREE.Group();
@@ -240,15 +248,14 @@ class LabScene {
                 const zone = corridor ? null : zoneAt(tx, tz);
                 // The break room is an annex outside every zone, so its ground gets floor laid for
                 // the biggest it could ever grow to; _updateFloor shows only the part in use.
-                const annex = tx >= BREAK_ROOM_MAX.x0 && tx < BREAK_ROOM_MAX.x0 + BREAK_ROOM_MAX.w &&
-                              tz >= BREAK_ROOM_MAX.z0 && tz < BREAK_ROOM_MAX.z0 + BREAK_ROOM_MAX.h;
+                const annex = inAnnexFootprint(tx, tz);
                 if (!corridor && !zone && !annex) continue;
                 const light = (tx + tz) % 2 === 0;
                 const col = corridor ? (light ? 0xdfe6d8 : 0xd2d9c9) : (light ? 0xf3efe3 : 0xe3ddcc);
                 const t = box(0.98, 0.12, 0.98, col);
                 const w = tileToWorld(tx, tz);
                 t.position.set(w.x, -0.06, w.z);
-                // baseCol is what this tile looks like with nothing painted over it — repainting
+                // baseCol is what this tile looks like with nothing painted over it. Repainting
                 // (unowned land, a room laid on top) starts from here rather than re-deriving the
                 // corridor/break-room/checker rules a second time.
                 t.userData = { kind: 'tile', tx, tz, zoneId: zone ? zone.id : null, light, baseCol: col, annex };
@@ -276,10 +283,10 @@ class LabScene {
             const tr = new THREE.Mesh(new THREE.BoxGeometry(w + 0.06, 0.18, d + 0.06), trimMat); tr.position.y = H + 0.05;
             g.add(b, tr); g.position.set(cx, 0, cz); this.scene.add(g);
         };
-        // The nav grid only tracks per-tile walkability, not per-edge walls — there's no way to
+        // The nav grid only tracks per-tile walkability, not per-edge walls. There's no way to
         // mark "these two adjacent tiles are both walkable but you can't cross between them". So
         // the entrance opening here MUST match grid.js's corridor width exactly (gateXRange), not
-        // just the two literal gate-post columns — otherwise a nav-walkable corridor tile ends up
+        // just the two literal gate-post columns. Otherwise a nav-walkable corridor tile ends up
         // sitting right behind a rendered wall with nothing stopping a worker from walking through it.
         // The predicate lives in grid.js, not here: placement of wall-mounted fittings reads the
         // same function to decide where there's a wall to hang on, and two copies of "where is
@@ -331,8 +338,8 @@ class LabScene {
         }
         return null;
     }
-    // Locked wings get corner posts, a muted floor tint, and — strung across the one edge that
-    // actually opens onto owned territory — a strip of black-and-yellow caution tape. The name
+    // Locked wings get corner posts, a muted floor tint, and. Strung across the one edge that
+    // actually opens onto owned territory. A strip of black-and-yellow caution tape. The name
     // and price live in the Build menu's Expand Lab list, so there's no in-world text to go blurry.
     _buildZoneFences() {
         for (const zone of ZONES) {
@@ -374,7 +381,8 @@ class LabScene {
     _updateFloor(state) {
         const zonesKey = state.ownedZones.slice().sort().join(',');
         const roomsKey = state.equipment.filter(e => BUILD[e.type].room)
-            .map(e => `${e.type}@${e.tx},${e.tz}`).sort().join('|') + '#' + breakRoom(state).level
+            .map(e => `${e.type}@${e.tx},${e.tz}`).sort().join('|')
+            + '#' + ANNEX_KINDS.map(k => annexLevel(state, k)).join('.')
             + '#' + (state.outbreak ? state.outbreak.tiles.join(';') : '');
         if (zonesKey === this._zonesKey && roomsKey === this._roomsKey) return;
         this._zonesKey = zonesKey; this._roomsKey = roomsKey;
@@ -384,7 +392,7 @@ class LabScene {
             if (rec) rec.group.visible = !state.ownedZones.includes(zone.id);
         }
         // roomAreas() is the same description buildNav() walls off, so the partitions drawn here
-        // stand exactly where staff are actually stopped — including the break room, which is just
+        // stand exactly where staff are actually stopped, including the break room, which is just
         // another walled area as far as this is concerned.
         const areas = roomAreas(state);
         const sealed = new Set(state.outbreak ? state.outbreak.tiles : []);
@@ -412,7 +420,7 @@ class LabScene {
     // Partition walls around the outside of each room, in the same style as the break room's.
     // Only edges facing something that isn't the same kind of room get a wall, so laying a second
     // Dark Room flush against the first reads as one larger room rather than two boxes with a
-    // wall between them — that's what makes rooms extendable.
+    // wall between them, that's what makes rooms extendable.
     _rebuildRoomWalls(state, areas) {
         if (this.roomWalls) {
             this.scene.remove(this.roomWalls);
@@ -423,16 +431,16 @@ class LabScene {
         for (const [kind, tiles] of areas) {
             const style = ROOM_STYLE[kind] || ROOM_STYLE.sterile;
             // The break room is walled at knee height instead of the full 0.85 the lab rooms get.
-            // It's the one room whose whole appeal is watching what happens inside — staff milling
-            // about, queuing at the coffee machine, complaining — and full-height partitions hid
+            // It's the one room whose whole appeal is watching what happens inside. Staff milling
+            // about, queuing at the coffee machine, complaining, and full-height partitions hid
             // exactly that from the two camera angles that look at its near side.
             //
             // Lowered rather than removed: the doorway in this wall is the only way in, and the
             // nav grid blocks these same edges. Deleting the wall outright would leave staff
             // walking the long way round a boundary that isn't drawn any more, which is precisely
             // the "they walk through the break room wall" complaint in reverse.
-            const H = kind === 'break' ? BREAK_WALL_H : ROOM_WALL_H;
-            const doors = kind === 'break' ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
+            const H = ANNEX_KINDS.includes(kind) ? BREAK_WALL_H : ROOM_WALL_H;
+            const doors = ANNEX_KINDS.includes(kind) ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
             for (const key of tiles) {
                 const [tx, tz] = key.split(',').map(Number);
                 const w = tileToWorld(tx, tz);
@@ -460,7 +468,7 @@ class LabScene {
     }
 
 
-    // A dedicated, genuinely walled-off break room (not player-built) — real labs don't allow
+    // A dedicated, genuinely walled-off break room (not player-built). Real labs don't allow
     // food or drink on the work floor, so this needed to be its own little room rather than a
     // machine just standing in the open. Coffee machine, water cooler, vending machine and a
     // table are each on their own tile (blocking movement, like any piece of equipment); the
@@ -479,7 +487,10 @@ class LabScene {
         this.breakRoomGroup = new THREE.Group();
         this.scene.add(this.breakRoomGroup);
         this.coffeeMachine = null; this.radioProp = null;
-        for (const prop of breakRoomProps(state)) {
+        // Both annexes are furnished the same way, from the same table in grid.js. The props
+        // differ, the mechanism doesn't.
+        const props = ANNEX_KINDS.flatMap(k => annexProps(state, k));
+        for (const prop of props) {
             const w = tileToWorld(prop.tile[0], prop.tile[1]);
             const g = this[`_prop_${prop.key}`]();
             g.position.set(w.x, 0, w.z);
@@ -495,6 +506,27 @@ class LabScene {
                 this.radioProp = r;
             }
         }
+    }
+    // Stockroom racking. Deliberately the same open timber shelving the crates arrive in, so a
+    // full stockroom reads as "lots of boxes" at a glance and an empty one reads as bare shelves.
+    _prop_rack() {
+        const g = new THREE.Group();
+        const CRATE = [0xa9793f, 0x8f6633, 0xbb8a4d];
+        for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+            const post = box(0.07, 1.25, 0.07, 0x6b5233);
+            post.position.set(sx * 0.4, 0.62, sz * 0.2); g.add(post);
+        }
+        for (let i = 0; i < 3; i++) {
+            const y = 0.24 + i * 0.42;
+            const shelf = box(0.88, 0.06, 0.46, 0x9a7247); shelf.position.y = y; g.add(shelf);
+            for (let k = 0; k < 2; k++) {
+                const crate = box(0.3, 0.22, 0.26, CRATE[(i + k) % CRATE.length]);
+                crate.position.set((k - 0.5) * 0.44, y + 0.14, 0); g.add(crate);
+                const strap = box(0.32, 0.04, 0.28, 0x6b5233);
+                strap.position.set(crate.position.x, y + 0.14, 0); g.add(strap);
+            }
+        }
+        return g;
     }
     _prop_coffee() {
         const g = new THREE.Group();
@@ -588,7 +620,7 @@ class LabScene {
         el.addEventListener('contextmenu', e => e.preventDefault());
         window.addEventListener('resize', () => this._resize());
 
-        // WASD pans the camera continuously while held, same destination as a mouse drag — held
+        // WASD pans the camera continuously while held, same destination as a mouse drag. Held
         // state only, the actual per-frame movement happens in _updatePanKeys() from _animate().
         this._panKeys = new Set();
         const PAN_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD']);
@@ -607,7 +639,7 @@ class LabScene {
     _updatePanKeys(dt) {
         if (!this._panKeys.size) return;
         const theta = this.controls.getAzimuthalAngle();
-        // Flat (XZ) "camera → target" direction at this azimuth — see _updateAzTween's use of
+        // Flat (XZ) "camera → target" direction at this azimuth. See _updateAzTween's use of
         // the same Spherical convention for "target → camera" (the position offset); this is
         // just that direction reversed, since panning "forward" scrolls the ground toward camera.
         const fx = -Math.sin(theta), fz = -Math.cos(theta);
@@ -622,11 +654,11 @@ class LabScene {
         const PAN_SPEED = 8;   // world units/sec
         const step = PAN_SPEED * dt / len;
         const dx = mx * step, dz = mz * step;
-        // A real pan has to move the camera itself, not just where it's looking — moving only
+        // A real pan has to move the camera itself, not just where it's looking. Moving only
         // the target leaves the camera behind, so controls.update() (which re-derives azimuth
         // and polar from the camera→target offset every frame) sees a different offset and
         // reads it as the view having tilted, not panned. Translating both by the same delta
-        // keeps that offset — and so the tilt — exactly as it was, same as OrbitControls' own
+        // keeps that offset, and so the tilt. Exactly as it was, same as OrbitControls' own
         // drag-to-pan already does under the hood.
         this.controls.target.x += dx; this.controls.target.z += dz;
         this.camera.position.x += dx; this.camera.position.z += dz;
@@ -715,13 +747,13 @@ class LabScene {
         const col = EQUIP_COLOR[e.type] || 0xcccccc;
         const [fw, fh] = BUILD[e.type].foot;                 // model built in base orientation
         // Where the loaded samples sit on this machine. Most hold them on a flat tray; the
-        // centrifuge holds them in its rotor, higher up and — since that's the whole point of a
-        // centrifuge — spinning along with it whenever a run is actually under way.
+        // centrifuge holds them in its rotor, higher up and. Since that's the whole point of a
+        // centrifuge. Spinning along with it whenever a run is actually under way.
         const tray = new THREE.Group(); tray.position.y = TRAY_Y[e.type] ?? 0.62;
         if (e.type === 'centrifuge') { tray.userData.spinAnim = true; tray.userData.spinRate = 16; }
         g.userData.tray = tray; g.add(tray);
 
-        // The progress bar isn't modelled here at all — it's a DOM element positioned in
+        // The progress bar isn't modelled here at all. It's a DOM element positioned in
         // _syncProgressBars(), for the same reason the speech bubbles are: the 3D pass renders at
         // a fraction of screen resolution for the pixel-art look, which left a thin bar chunky and
         // hard to read. A flat panel in the scene also had to face *somewhere*, so it went nearly
@@ -732,7 +764,7 @@ class LabScene {
         // Condition is shown on the machine itself rather than by a coloured block floating over
         // it: as it wears, its own colours darken and dull (see applyCondition() below), the way
         // a neglected machine actually looks. That reads at a glance across the whole floor
-        // without adding anything to the scene, and it scales — you can see the difference
+        // without adding anything to the scene, and it scales. You can see the difference
         // between "a bit tired" and "about to go" instead of a light that's either on or off.
         //
         // Broken is the one state that isn't a matter of degree, so it gets a mark rather than a
@@ -750,7 +782,7 @@ class LabScene {
         g.userData.cross = cross;
 
         // Flames. Built for every machine up front and simply hidden rather than spawned when a
-        // fire starts — a fire is a fact about the machine, not an entity of its own, so this
+        // fire starts. A fire is a fact about the machine, not an entity of its own, so this
         // keeps it out of the reconcile bookkeeping entirely. Cones scattered over the footprint,
         // flickering in sync() so it reads as burning rather than as an orange hat.
         const fire = new THREE.Group();
@@ -782,7 +814,7 @@ class LabScene {
             }
             const shelf = box(0.7, 0.1, 0.16, 0xdedede); shelf.position.set(0, 0.72, -0.32); g.add(shelf);
             // Bunsen burner, lit only while the bench is actually running a prep (see sync()).
-            // The flame's geometry is shifted so it sits on the barrel — scaling it then makes it
+            // The flame's geometry is shifted so it sits on the barrel. Scaling it then makes it
             // lick upward from the burner rather than growing out of both ends.
             const burnerBase = cyl(0.075, 0.095, 0.045, 8, 0x6b7075); burnerBase.position.set(0.27, 0.62, 0.22); g.add(burnerBase);
             const burnerTube = cyl(0.028, 0.032, 0.17, 8, 0x8a9196); burnerTube.position.set(0.27, 0.73, 0.22); g.add(burnerTube);
@@ -797,7 +829,7 @@ class LabScene {
             flameCore.position.set(0.27, 0.81, 0.22); flameCore.visible = false;
             flameCore.userData.flame = true; g.add(flameCore);
         } else if (e.type === 'preprobot') {
-            // A benchtop liquid-handling deck spanning its full 2×1 footprint — classic Tecan-style
+            // A benchtop liquid-handling deck spanning its full 2×1 footprint. Classic Tecan-style
             // rig: a bench with a small well grid, an XY gantry (two side rails + a crossing
             // bridge) suspended over it, and a pipetting head hanging off the bridge.
             const benchTop = box(fw - 0.15, 0.14, fh - 0.15, 0xc4cdd2); benchTop.position.y = 0.52; g.add(benchTop);
@@ -817,7 +849,7 @@ class LabScene {
                 g.add(post);
             }
             // The bridge (+head +tip) rides as one carriage that actually slides along the rails
-            // while a run is active (see sync()'s timedBusy handling) — a static gantry read as
+            // while a run is active (see sync()'s timedBusy handling). A static gantry read as
             // just a shelf with a bar over it, not a robot at work.
             const carriage = new THREE.Group(); carriage.position.set(0, railY, 0);
             carriage.userData.gantrySlide = true; carriage.userData.gantryRange = fw / 2 - 0.3;
@@ -826,8 +858,8 @@ class LabScene {
             const head = box(0.09, 0.16, 0.06, 0x8a9196); head.position.set(0, -0.14, 0); carriage.add(head);
             const tip = box(0.05, 0.03, 0.03, 0x37ff8a, { transparent: true, opacity: 0.9 });
             tip.position.set(0, -0.23, 0); tip.userData.spin = true; carriage.add(tip);
-            // Sealed, extracted glass enclosure over the whole deck. Nothing reaches in — it's
-            // automated — so unlike the hoods there's no access gap, and being contained is what
+            // Sealed, extracted glass enclosure over the whole deck. Nothing reaches in. It's
+            // automated, so unlike the hoods there's no access gap, and being contained is what
             // lets it run hazardous Chem Prep as well as routine prep (see BUILD.preprobot).
             const GH = 0.78, deckY = 0.58;
             const gy = deckY + GH / 2, gx = fw / 2 - 0.07, gz = fh / 2 - 0.07;
@@ -844,7 +876,7 @@ class LabScene {
             const exDuct = cyl(0.1, 0.1, 0.28, 10, 0x8a9196); exDuct.position.set(fw * 0.28, deckY + GH + 0.14, 0); g.add(exDuct);
             const exCap = cyl(0.13, 0.13, 0.04, 10, 0x6b7075); exCap.position.set(fw * 0.28, deckY + GH + 0.3, 0); g.add(exCap);
         } else if (e.type === 'microscope') {
-            // Used to float knee-high on a squat pedestal — now sits properly on a bench, like
+            // Used to float knee-high on a squat pedestal. Now sits properly on a bench, like
             // the actual Lab Bench model, with the scope mounted on top.
             const benchTop = box(0.85, 0.14, 0.85, 0xc4cdd2); benchTop.position.y = 0.51; g.add(benchTop);
             for (const [x, z] of [[.32, .32], [-.32, .32], [.32, -.32], [-.32, -.32]]) {
@@ -858,7 +890,7 @@ class LabScene {
             // The tubes in the rotor well are the real staged/running samples (_syncTray lays this
             // type out radially) and they whirl round with the rotor spider on a run. The lid is
             // clear polycarbonate and hinged at the back: it drops shut while the rotor is up to
-            // speed — you can't spin one open — and stands open again the moment the run ends, so
+            // speed. You can't spin one open, and stands open again the moment the run ends, so
             // you can still watch the samples through it either way.
             const drum = cyl(0.43, 0.46, 0.5, 14, col); drum.position.y = 0.25; g.add(drum);
             const rim = cyl(0.47, 0.45, 0.07, 14, 0xb8c2c6); rim.position.y = 0.53; g.add(rim);
@@ -870,7 +902,7 @@ class LabScene {
                 const arm = box(0.6, 0.025, 0.06, 0x9aa2a8); arm.rotation.y = rot; rotor.add(arm);
             }
             // A clear collar closes the drum in around the rotor, and the lid is a flat disc
-            // hinged at the back that swings to exactly vertical — no further. Stopping at 90°
+            // hinged at the back that swings to exactly vertical, no further. Stopping at 90°
             // is what keeps it inside the machine's own tile: standing straight up, only the
             // disc's 5cm thickness sits behind the hinge, where tipping it past vertical would
             // swing its whole radius out over the tile behind (and into the wall).
@@ -900,13 +932,13 @@ class LabScene {
         } else if (e.type === 'incubator') {
             // Same idea as the cold stores: the cabinet stops short of the door so there's a warm,
             // shelved recess to see when it swings open, and the door is hinged rather than painted
-            // on. Layers are kept at deliberately different depths — they used to be near-coplanar
+            // on. Layers are kept at deliberately different depths. They used to be near-coplanar
             // and z-fought at most camera angles.
             const bodyFace = fh / 2 - 0.075;
             const RECESS = 0.2, back = -(fh / 2 - 0.075), front = bodyFace - RECESS;
             const body = box(fw - 0.15, 1.2, front - back, col);
             body.position.set(0, 0.66, (front + back) / 2); g.add(body);
-            // Kept within the footprint of the shut door, same as the cold stores — and framed the
+            // Kept within the footprint of the shut door, same as the cold stores, and framed the
             // same way, so nothing shows through around the door when it's closed.
             const dwI = fw - 0.3, inWI = dwI - 0.08, doorHI = 0.85;
             const inTopI = 0.6 + 0.425 - 0.05, inBotI = 0.6 - 0.425 + 0.05;
@@ -945,7 +977,7 @@ class LabScene {
             handle.position.set(dw - 0.06, -0.1, 0.04); hinge.add(handle);
         } else if (e.type === 'sequencer') {
             // A big benchtop instrument: heavy chassis, a lit flow-cell bay on the front face, and
-            // a monitor on a stalk showing the read as it comes off — both lights only on while
+            // a monitor on a stalk showing the read as it comes off. Both lights only on while
             // it's actually running (userData.spin), like every other machine's activity tell.
             const cabFace = (fh - 0.2) / 2;
             const body = box(fw - 0.2, 1.0, fh - 0.2, col); body.position.y = 0.52; g.add(body);
@@ -974,11 +1006,11 @@ class LabScene {
         } else if (e.type === 'analysisdesk') {
             // Sized against the wall, not against the tile. A tile is 1.0 across, but a wall
             // segment is 0.32 thick and straddles the tile boundary, so it eats the outer 0.16 of
-            // any tile it borders — the usable interior is really ±0.34. This desk was the widest
+            // any tile it borders. The usable interior is really ±0.34. This desk was the widest
             // 1×1 in the catalogue (±0.46) with its legs at ±0.41, so stood against a wall the far
             // edge and two whole legs were swallowed by it. The legs now sit at ±0.30 (outer edge
             // 0.33) so they always clear, and the top is brought in to the same ±0.42 as the Lab
-            // Bench — its overhanging edge just touches the wall, which is how a desk pushed
+            // Bench. Its overhanging edge just touches the wall, which is how a desk pushed
             // against one should look anyway.
             const top = box(0.84, 0.08, 0.62, col); top.position.y = 0.5; g.add(top);
             for (const [x, z] of [[.30, .24], [-.30, .24], [.30, -.24], [-.30, -.24]]) {
@@ -994,7 +1026,7 @@ class LabScene {
         } else if (e.type === 'door' || e.type === 'airlock') {
             // Stands in the wall line on the side it faces, so it reads as a gap in the partition
             // rather than a cupboard in the middle of the floor. An airlock is two leaves with a
-            // lit vestibule between them — that's where staff gown up on the way through.
+            // lit vestibule between them, that's where staff gown up on the way through.
             const twin = e.type === 'airlock';
             const H = 0.9, zFace = 0.44;
             for (const sx of [-1, 1]) {
@@ -1018,13 +1050,13 @@ class LabScene {
         } else if (e.type === 'firealarm') {
             // A round grey sounder bolted flat to the wall, not a box standing on the floor. Its
             // backplate lands exactly on the wall's inner face (the shell slab spans 0.34–0.66
-            // from the tile centre) with the bell standing proud of it into the room — buried any
+            // from the tile centre) with the bell standing proud of it into the room. Buried any
             // deeper and it vanishes into the wall from inside; any shallower and it floats.
             // Which wall it's on isn't the player's to get wrong either: grid.wallFacing() snaps
             // the rotation at placement time, so there is always a drawn wall right behind it.
             //
-            // It sits at cornice height — 1.39–1.71 against a 1.60 wall with an 0.18 trim on top
-            // — which is high enough that its geometry clears every machine in the catalogue,
+            // It sits at cornice height, 1.39–1.71 against a 1.60 wall with an 0.18 trim on top
+            //, which is high enough that its geometry clears every machine in the catalogue,
             // measured one by one, even the three that are taller than it overall.
             const zFace = 0.27, y = 1.55;
             const backplate = cyl(0.08, 0.08, 0.06, 12, 0x8a9196); backplate.rotation.x = Math.PI / 2;
@@ -1059,7 +1091,7 @@ class LabScene {
             chill.position.set(0, (inTop + inBot) / 2, front + 0.05); g.add(chill);
             // Frame around the opening. The recess is a full-width gap in the front of the
             // cabinet, so with the door shut you could still see into it over the door's top edge
-            // from this camera angle — these panels close everything except the doorway itself.
+            // from this camera angle. These panels close everything except the doorway itself.
             const frameW = (fw - 0.2 - dwF) / 2, zMid = (front + zDoor) / 2;
             const lintelH = bodyH - (bodyH / 2 + doorH / 2);
             if (lintelH > 0.01) { const m = box(fw - 0.2, lintelH, RECESS, col); m.position.set(0, bodyH - lintelH / 2, zMid); g.add(m); }
@@ -1092,6 +1124,31 @@ class LabScene {
             const h2 = box(0.06, 0.34, 0.06, 0x8a9196); h2.position.set(dw - 0.07, 0, 0.04); hinge.add(h2);
             const fr = box(0.5, 0.12, 0.05, e.type === 'freezer' ? 0x2fa8d8 : 0x9fd6e6);
             fr.position.set(dw / 2, bodyH - 0.2 - body.position.y, 0); hinge.add(fr);
+        } else if (e.type === 'stockroom') {
+            // Open industrial racking rather than a closed cabinet: the whole point of the
+            // building is that you can see how full it is, so the shelves are visible and the
+            // crates on them are the same wooden boxes the deliveries arrive in.
+            const w = fw - 0.16, d = fh - 0.16;
+            for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+                const post = box(0.08, 1.4, 0.08, 0x6b5233);
+                post.position.set(sx * (w / 2 - 0.04), 0.7, sz * (d / 2 - 0.04)); g.add(post);
+            }
+            const CRATE = [0xa9793f, 0x8f6633, 0xbb8a4d];
+            for (let i = 0; i < 3; i++) {
+                const y = 0.22 + i * 0.5;
+                const shelf = box(w, 0.07, d, col); shelf.position.y = y; g.add(shelf);
+                // A couple of boxes per shelf, nudged about so the racking doesn't read as a
+                // perfectly stacked grid.
+                for (let k = 0; k < 2; k++) {
+                    const bw = 0.26 + (i + k) % 2 * 0.06;
+                    const crate = box(bw, 0.24, 0.24, CRATE[(i + k) % CRATE.length]);
+                    crate.position.set((k - 0.5) * w * 0.44, y + 0.16, ((i + k) % 2 - 0.5) * d * 0.28);
+                    g.add(crate);
+                    const strap = box(bw + 0.02, 0.04, 0.26, 0x6b5233);
+                    strap.position.set(crate.position.x, y + 0.16, crate.position.z); g.add(strap);
+                }
+            }
+            const label = box(0.22, 0.14, 0.02, 0xf4ede0); label.position.set(0, 1.28, d / 2 - 0.02); g.add(label);
         } else if (e.type === 'mopcloset') {
             // Broom and bucket used to sit far enough forward (and the tilted broom's swing far
             // enough) that both poked out through the closet's own front face instead of reading
@@ -1102,7 +1159,7 @@ class LabScene {
             const bucket = cyl(0.15, 0.13, 0.19, 8, 0xf0c040); bucket.position.set(-0.2, 0.235, 0.46); g.add(bucket);
         } else if (e.type === 'sink') {
             // The basin used to sit at the same height as the counter (top faces exactly
-            // coincident, overlapping footprints) — a textbook top-down z-fight. It's now
+            // coincident, overlapping footprints). A textbook top-down z-fight. It's now
             // properly recessed below the counter surface, like a real inset basin, with a
             // visible rim gap instead of a shared plane.
             const counterTop = 0.55;
@@ -1126,7 +1183,7 @@ class LabScene {
             const num = box(0.16, 0.05, 0.01, 0x37ff8a, { transparent: true, opacity: 0.85 });
             num.position.set(0, 0.55, 0.265); num.userData.spin = true; g.add(num);
         } else if (e.type === 'flowhood' || e.type === 'fumehood') {
-            // Enclosed on all four sides — the whole point of either cabinet is containment, so a
+            // Enclosed on all four sides. The whole point of either cabinet is containment, so a
             // hood open on the sides would defeat it. The front panel stops short of the counter,
             // leaving a gap to reach through instead of a full wall, same as a real sash/glovebox.
             const isFume = e.type === 'fumehood';
@@ -1148,7 +1205,7 @@ class LabScene {
             }
             if (isFume) {
                 const stripe = box(0.87, 0.05, 0.03, 0xf0c040); stripe.position.set(0, counterTop - 0.03, 0.435); g.add(stripe);
-                // Capped off on top, same as the Flow Hood — an extraction cabinet open to the
+                // Capped off on top, same as the Flow Hood. An extraction cabinet open to the
                 // room above the sash wouldn't contain anything. The duct rises out of the lid.
                 const lid = box(0.8, 0.12, 0.8, 0xb8c2c6); lid.position.y = hoodY + 0.06; g.add(lid);
                 const glassTop = box(0.66, 0.02, 0.66, glassCol, { transparent: true, opacity: glassOp });
@@ -1185,8 +1242,8 @@ class LabScene {
         if (e.id != null) this._applyEquipTransform(g, e);
         return g;
     }
-    // Wear shading. Nothing happens down to COND_SLOW_THRESHOLD — a machine in normal service
-    // looks normal — and below that it darkens progressively toward SHADE_MIN, so the visible
+    // Wear shading. Nothing happens down to COND_SLOW_THRESHOLD. A machine in normal service
+    // looks normal, and below that it darkens progressively toward SHADE_MIN, so the visible
     // change starts at exactly the point where the condition begins to cost you run time.
     _applyCondition(mesh, condition) {
         const t = Math.max(0, Math.min(1, (COND_SLOW_THRESHOLD - condition) / COND_SLOW_THRESHOLD));
@@ -1208,11 +1265,11 @@ class LabScene {
     }
     _syncTray(g, e) {
         const tray = g.userData.tray;
-        // Staged samples (dimmed — waiting on a fuller batch or their turn) render alongside
-        // actively running ones (full color), one item per sample either way — a solo run is
+        // Staged samples (dimmed. Waiting on a fuller batch or their turn) render alongside
+        // actively running ones (full color), one item per sample either way. A solo run is
         // just a processing entry with one id in it, same as a batch with several. Each item's
         // shape follows the same tube/slide/report logic as the loose sample mesh (see
-        // appearanceForCap) — samples used to always render as a plain tube dot here regardless
+        // appearanceForCap). Samples used to always render as a plain tube dot here regardless
         // of stage, so a report waiting to be analyzed on the bench looked like it had reverted
         // to a fresh sample the moment it got staged there.
         const items = [];
@@ -1272,7 +1329,7 @@ class LabScene {
         return g;
     }
     // (Re)builds a sample's visible form for whatever it's currently headed toward. Called once
-    // at creation and again whenever its step (and so its appearance category) changes — most
+    // at creation and again whenever its step (and so its appearance category) changes. Most
     // samples never trigger the second case at all, only ones on a chain that passes through
     // image or analyze.
     _fillSample(g, s) {
@@ -1288,7 +1345,7 @@ class LabScene {
             const smear = box(0.12, 0.022, 0.08, c); smear.position.set(-0.05, 0.101, 0); g.add(smear);
             const label = box(0.09, 0.021, 0.13, 0xf4ede0); label.position.set(0.12, 0.1, 0); g.add(label);
         } else if (appearance === 'report') {
-            // A written-up report on a clipboard, on its way to be analyzed at a desk — flat
+            // A written-up report on a clipboard, on its way to be analyzed at a desk. Flat
             // paper with a couple of ruled lines and a proto-colored result stamp.
             const board = box(0.28, 0.02, 0.36, 0x8a6a4a); board.position.y = 0.08; g.add(board);
             const paper = box(0.24, 0.015, 0.3, 0xf4ede0); paper.position.y = 0.095; g.add(paper);
@@ -1320,7 +1377,7 @@ class LabScene {
         g.userData.coat = coat; g.userData.legs = legs; g.userData.hood = hood; g.userData.visor = visor;
         g.userData.suited = false;
         if (s.hairLong) {
-            // Hangs down the back of the head rather than just capping it — same hair color,
+            // Hangs down the back of the head rather than just capping it, same hair color,
             // assigned once at hiring alongside the short/long choice so it doesn't change look
             // from one render to the next.
             const hairBack = box(0.2, 0.26, 0.1, hairCol); hairBack.position.set(0, 0.78, -0.15);
@@ -1340,7 +1397,7 @@ class LabScene {
         g.userData.body = body; g.userData.coat = coat; g.userData.mop = mop;
         g.add(body);
 
-        // Chatter state — the bubble itself is a DOM element (see _syncSpeechBubbles), not a 3D
+        // Chatter state. The bubble itself is a DOM element (see _syncSpeechBubbles), not a 3D
         // sprite: the whole scene renders at low internal resolution for the pixel-art look,
         // which makes any text baked into a texture come out blurry/illegible.
         g.userData.chatterText = null;
@@ -1351,8 +1408,25 @@ class LabScene {
         return g;
     }
 
-    // Contractors on site. Deliberately a different silhouette from the scientists — hi-vis
-    // overalls, a hard hat and a toolbox on the floor beside them while they work — so a mechanic
+    // A delivery crate: a wooden box with a strap and a paper docket, small enough to be carried.
+    // Its contents show as a coloured chit on the lid so a stack in the doorway reads as "three
+    // boxes of flow cells" rather than three identical boxes.
+    _buildCrate(c) {
+        const g = new THREE.Group();
+        g.userData = { kind: 'crate', id: c.id, carried: false };
+        const body = box(0.42, 0.3, 0.34, 0xa9793f); body.position.y = 0.15; g.add(body);
+        const lid = box(0.44, 0.05, 0.36, 0x8f6633); lid.position.y = 0.32; g.add(lid);
+        for (const sx of [-1, 1]) {
+            const strap = box(0.05, 0.32, 0.36, 0x6b5233); strap.position.set(sx * 0.13, 0.16, 0); g.add(strap);
+        }
+        const docket = box(0.14, 0.01, 0.1, 0xf4ede0); docket.position.set(0.08, 0.35, 0.04); g.add(docket);
+        const chit = box(0.1, 0.012, 0.07, CRATE_TINT[c.key] || 0xcfd8dd);
+        chit.position.set(-0.1, 0.355, -0.02); g.add(chit);
+        return g;
+    }
+
+    // Contractors on site. Deliberately a different silhouette from the scientists. Hi-vis
+    // overalls, a hard hat and a toolbox on the floor beside them while they work, so a mechanic
     // in among the staff reads as "somebody who doesn't work here" at a glance, which is the
     // whole point of showing the visit rather than applying it overnight.
     _buildVisitor(v) {
@@ -1430,7 +1504,7 @@ class LabScene {
     }
     // Disinfection crew: full white hazmat suit with a hood and dark visor, green trim, a tank on
     // the back and a fogging wand. Deliberately close to how staff look gowned up for a
-    // Containment Lab — same job, done properly — but head to toe and in a different palette.
+    // Containment Lab, same job, done properly, but head to toe and in a different palette.
     _buildCleaner(v) {
         const g = new THREE.Group();
         g.userData = { kind: 'visitor', id: v.id, facing: 0, working: false };
@@ -1465,7 +1539,7 @@ class LabScene {
     // ---------- reconcile ----------
     sync(state, dt) {
         // Simulated movement is scaled by game speed (tick() feeds staff/samples dt*speed), but this
-        // lerp factor was only ever based on real wall-clock dt — so at 2x/3x speed the true position
+        // lerp factor was only ever based on real wall-clock dt, so at 2x/3x speed the true position
         // raced ahead each frame while the render crept after it in a straight line, cutting corners
         // through walls on longer walks (rather than tracking the tile-by-tile legal path). Scaling
         // the catch-up rate by speed too keeps the render's lag roughly constant at any speed.
@@ -1479,7 +1553,7 @@ class LabScene {
         // can be trusted, so drop the lot and let them rebuild from scratch.
         if (this._stateRef !== state) {
             this._stateRef = state;
-            for (const map of [this.equipMeshes, this.sampleMeshes, this.staffMeshes, this.visitorMeshes]) {
+            for (const map of [this.equipMeshes, this.sampleMeshes, this.staffMeshes, this.visitorMeshes, this.crateMeshes]) {
                 for (const mesh of map.values()) { this.scene.remove(mesh); disposeTree(mesh); }
                 map.clear();
             }
@@ -1491,7 +1565,7 @@ class LabScene {
         this._updateFloor(state);
 
         // Rooms live in state.equipment (they're bought, sold and saved like anything else) but
-        // they're drawn by _updateFloor as floor, so they get no mesh here — which also keeps them
+        // they're drawn by _updateFloor as floor, so they get no mesh here, which also keeps them
         // out of _pick()'s raycast, so clicking inside one lands on the tile and you can actually
         // build there.
         const burning = new Set((state.fires || []).map(f => f.equipId));
@@ -1541,7 +1615,7 @@ class LabScene {
 
             // Reliability light: red and blinking once broken (can't accept new work until a
             // mechanic fixes it), steady amber once worn enough that a breakdown becomes a real
-            // risk, otherwise hidden — most machines spend most of their life not showing this.
+            // risk, otherwise hidden. Most machines spend most of their life not showing this.
             // Fire. Drawn straight from state.fires rather than from a flag on the mesh, so a
             // machine that was set alight by a save-load or by spread lights up the same way.
             const alight = burning.has(e.id);
@@ -1562,14 +1636,14 @@ class LabScene {
             });
 
             // A machine that's actually on fire is already unmistakable, so it keeps its own
-            // colours — layering wear shading under the flames just made it muddy.
+            // colours. Layering wear shading under the flames just made it muddy.
             this._applyCondition(mesh, alight ? 100 : (e.condition ?? 100));
             const cross = mesh.userData.cross;
             if (cross) {
                 cross.visible = e.broken && !alight;
                 if (cross.visible) {
                     cross.rotation.y = this.controls.getAzimuthalAngle();   // billboard: square-on at every camera angle
-                    // A slow pulse rather than a hard blink — enough to catch the eye on a busy
+                    // A slow pulse rather than a hard blink, enough to catch the eye on a busy
                     // floor without flickering at you the whole time it sits there unfixed.
                     const k = 1 + Math.sin(this.elapsed * 3) * 0.07;
                     cross.scale.set(k, k, 1);
@@ -1593,7 +1667,7 @@ class LabScene {
                 // theirs exactly) — looked like it was floating inside their skull. Now offset
                 // to the carrier's side at roughly hand height, using their current facing so it
                 // stays on the same side of their body as they turn. A Sample Cart trip carries
-                // several at once — stacking them by height alone put a second tube's midpoint
+                // several at once. Stacking them by height alone put a second tube's midpoint
                 // below the first tube's top, so they clipped straight through each other; spread
                 // them along a row perpendicular to the carry direction instead, all level, so a
                 // full cart reads as several distinct tubes rather than one glowing blob.
@@ -1604,7 +1678,7 @@ class LabScene {
                 const n = carrier ? carrier.carrying.length : 1;
                 mesh.userData.facing = facing;
                 const hx = Math.cos(facing) * 0.21, hz = -Math.sin(facing) * 0.21;
-                // Each tube is 0.22 wide — spacing needs to clear that even in the worst-case
+                // Each tube is 0.22 wide. Spacing needs to clear that even in the worst-case
                 // orientation (the row axis running diagonally across a tube's square footprint,
                 // ~0.31 corner-to-corner), not just the straight-on 0.22.
                 const rowAngle = facing + Math.PI / 2;
@@ -1650,7 +1724,7 @@ class LabScene {
                 }
             }
             mesh.userData.target = { x: tx, y: 0, z: tz };
-            // Anchor for the wall-safety clamp below — only while genuinely stationary. A worker
+            // Anchor for the wall-safety clamp below, only while genuinely stationary. A worker
             // walking at 2x/3x game speed can legitimately lag its render-lerped position by more
             // than half a tile (the lerp has no notion of game speed), so clamping movers too would
             // make fast-forward staff visibly snap around instead of walking smoothly.
@@ -1671,6 +1745,23 @@ class LabScene {
             mesh.userData.chatterEligible = idling && Math.hypot(s.wx - cm.x, s.wz - cm.z) < 2.0;
             mesh.userData.radioEligible = idling && state.upgrades.radio > 0;
         });
+        // Delivery crates. Their own map for the same reason visitors have one: they're a distinct
+        // kind of thing that happens to be positioned every frame, and folding them into samples
+        // would mean guarding every sample lookup in the game.
+        this._reconcile(this.crateMeshes, state.deliveries || [], c => this._buildCrate(c), (mesh, c) => {
+            const carrier = c.claimedBy != null && state.staff.find(w => w.carryingCrate === c.id);
+            mesh.userData.carried = !!carrier;
+            if (carrier) {
+                // Held out in front at chest height rather than floating at the worker's centre.
+                const cm = this.staffMeshes.get(carrier.id);
+                const facing = cm ? cm.userData.facing : 0;
+                mesh.userData.facing = facing;
+                mesh.userData.target = { x: c.wx + Math.cos(facing) * 0.26, y: 0.42, z: c.wz - Math.sin(facing) * 0.26 };
+            } else {
+                mesh.userData.target = { x: c.wx, y: 0, z: c.wz };
+            }
+        });
+
         // Visitors ride their own map rather than being folded into state.staff, so nothing that
         // iterates staff (capacity, wages, the Staff panel, the separation pass) has to learn to
         // skip them.
@@ -1751,7 +1842,7 @@ class LabScene {
         this.sampleMeshes.forEach((mesh, id) => {
             step(mesh);
             if (mesh.userData.carried) {
-                // Held rigidly rather than idly spinning/bobbing — it's in a hand, not sitting
+                // Held rigidly rather than idly spinning/bobbing. It's in a hand, not sitting
                 // on a rack.
                 mesh.rotation.y = mesh.userData.facing || 0;
                 mesh.children[0].position.y = 0.17;
@@ -1776,6 +1867,10 @@ class LabScene {
             mop.visible = mesh.userData.mopping;
             if (mesh.userData.mopping) mop.rotation.z = 0.15 + Math.abs(Math.sin(this.elapsed * 6.5)) * 0.75;
             this._updateChatter(mesh);
+        });
+        this.crateMeshes.forEach((mesh) => {
+            step(mesh);
+            mesh.rotation.y = mesh.userData.carried ? (mesh.userData.facing || 0) : 0;
         });
         this.visitorMeshes.forEach((mesh) => {
             const d = step(mesh);
@@ -1839,7 +1934,7 @@ class LabScene {
     }
 
     // Projects every currently-chattering worker's head position to screen space and positions a
-    // real DOM element there — crisp at any zoom, unlike a texture baked into the low-res 3D pass.
+    // real DOM element there. Crisp at any zoom, unlike a texture baked into the low-res 3D pass.
     // Same trick as the speech bubbles: project the anchor point above each busy machine to screen
     // space and park a real DOM bar there. Crisp at any zoom, and readable from every camera angle
     // rather than turning edge-on when the view swings round.
@@ -1904,7 +1999,7 @@ class LabScene {
 
     // Pathfinding only reasons about tiles, so two workers queued at the same machine both walk
     // to the same access tile and would render stacked on each other. This nudges any staff that
-    // end up too close apart each frame — a lightweight crowd-separation pass, purely cosmetic,
+    // end up too close apart each frame. A lightweight crowd-separation pass, purely cosmetic,
     // so waiting staff visibly stand aside instead of overlapping.
     // Keeps everyone on the floor out of each other's models — staff and visiting contractors
     // alike. The pathfinder reasons in whole tiles and has no notion of two people wanting the
@@ -1923,7 +2018,7 @@ class LabScene {
                 let d = Math.hypot(dx, dz);
                 if (d >= MIN_DIST) continue;
                 if (d < 1e-4) {
-                    // exactly coincident — pick a deterministic direction so they don't jitter randomly
+                    // exactly coincident. Pick a deterministic direction so they don't jitter randomly
                     const ang = ((a.userData.id * 2654435761) % 360) * Math.PI / 180;
                     dx = Math.cos(ang); dz = Math.sin(ang); d = 1;
                 }
@@ -2000,10 +2095,10 @@ class LabScene {
     rotateView(dir) {
         // Chaining off the queued destination (below) tracks where the view is *headed*
         // correctly across a rapid double-tap, but "from" is read fresh as the camera's actual
-        // current angle each call — and between two presses close enough together that no
+        // current angle each call, and between two presses close enough together that no
         // render frame has landed in between, the camera hasn't physically moved at all yet.
         // The result: "to" keeps marching forward a full step per press while "from" stays put,
-        // so the tween span grows with every extra press but its duration doesn't — a handful of
+        // so the tween span grows with every extra press but its duration doesn't. A handful of
         // fast presses could queue up a many-hundred-degree sweep to cover in the same ~0.28s,
         // reading as the view spinning wildly rather than stepping. A short cooldown sidesteps
         // the whole problem by simply not letting a new step start that fast to begin with.
@@ -2022,7 +2117,7 @@ class LabScene {
     // leftover keeps nudging the camera on top of our tween every frame, since update() always
     // re-applies it regardless of who else is driving the camera. Toggling damping off for one
     // update() call applies 100% of whatever's left and then clears it, instead of trickling it
-    // out — so the tween starts from the camera's true resting angle and nothing fights it after.
+    // out, so the tween starts from the camera's true resting angle and nothing fights it after.
     _drainMomentum() {
         const wasDamping = this.controls.enableDamping;
         this.controls.enableDamping = false;

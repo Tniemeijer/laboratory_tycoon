@@ -25,7 +25,7 @@ import { G, nid, nav, bumpNav, dirtyUI } from '../core.js';
 import { GRID, tileToWorld, worldToTile, footTiles, gateWorld, GATE_COLS } from '../grid.js';
 import { aStar, nearestAccess } from '../pathfind.js';
 
-const VISITOR_SPEED = STAFF_SPEED * 0.85;      // unhurried — they're on the clock, not yours
+const VISITOR_SPEED = STAFF_SPEED * 0.85;      // unhurried. They're on the clock, not yours
 const GATE_TILE = [GATE_COLS[0], GRID - 1];
 
 // ---------- movement (a cut-down copy of the staff walker) ----------
@@ -71,7 +71,7 @@ function stepPath(v, dt) {
     return 'moving';
 }
 function goTo(v, tile) { v.goal = tile; v.path = null; }
-// Somewhere to stand while working on this machine — beside it, never on it.
+// Somewhere to stand while working on this machine. Beside it, never on it.
 function accessTile(e) {
     return nearestAccess(nav(), GRID, GRID, footTiles(e.type, e.tx, e.tz, e.rot), GATE_TILE[0], GATE_TILE[1]) || null;
 }
@@ -91,8 +91,8 @@ export function spawnMechanic(jobs) {
     });
     s.money -= MECH_CALLOUT_FEE;
     G.onToast(jobs.length
-        ? `The mechanic's here — ${jobs.length} machine${jobs.length > 1 ? 's' : ''} to get through`
-        : `Mechanic called out to nothing — $${MECH_CALLOUT_FEE} for the trip`, !jobs.length);
+        ? `The mechanic's here, ${jobs.length} machine${jobs.length > 1 ? 's' : ''} to get through`
+        : `Mechanic called out to nothing, $${MECH_CALLOUT_FEE} for the trip`, !jobs.length);
     dirtyUI();
 }
 
@@ -158,8 +158,8 @@ function updateMechanic(v, dt) {
             if (r !== 'arrived' && r !== 'blocked') break;
             s.visitors = s.visitors.filter(x => x !== v);
             G.onToast(v.repaired || v.serviced
-                ? `Mechanic done: ${v.repaired} repaired, ${v.serviced} serviced — $${v.billed.toLocaleString()}`
-                : `Mechanic left without touching anything — $${v.billed.toLocaleString()} for the call-out`,
+                ? `Mechanic done: ${v.repaired} repaired, ${v.serviced} serviced, $${v.billed.toLocaleString()}`
+                : `Mechanic left without touching anything, $${v.billed.toLocaleString()} for the call-out`,
                 !(v.repaired || v.serviced));
             dirtyUI();
             break;
@@ -169,7 +169,7 @@ function updateMechanic(v, dt) {
 
 // ---------- the fire brigade ----------
 // Spawned by incidents.js when the engine's ETA runs out. They work the fires down one at a time,
-// two at once, and the fires can still be spreading while they do — so the list is re-read every
+// two at once, and the fires can still be spreading while they do, so the list is re-read every
 // time someone finishes rather than fixed when they arrived.
 export function spawnFireCrew() {
     const s = G.state;
@@ -209,7 +209,7 @@ function updateFirefighter(v, dt) {
                 if (!f) { v.state = 'leaving'; goTo(v, GATE_TILE); break; }
                 const e = s.equipment.find(x => x.id === f.equipId);
                 const acc = accessTile(e);
-                if (!acc) { f.crew = -1; break; }             // can't be reached at all — leave it burning
+                if (!acc) { f.crew = -1; break; }             // can't be reached at all. Leave it burning
                 f.crew = v.id; v.target = f; v.targetId = f.equipId;
                 goTo(v, acc);
             }
@@ -225,7 +225,7 @@ function updateFirefighter(v, dt) {
             v.timer += dt;
             if (v.timer < FIRE_FIGHT_TIME) break;
             s.fires = s.fires.filter(f => f !== v.target);
-            G.onToast(`${BUILD[s.equipment.find(x => x.id === v.targetId)?.type]?.name || 'Machine'} — fire out`);
+            G.onToast(`${BUILD[s.equipment.find(x => x.id === v.targetId)?.type]?.name || 'Machine'}. Fire out`);
             v.target = null; v.targetId = null; v.state = 'toFire';
             dirtyUI();
             break;
@@ -271,7 +271,7 @@ function updateCleaner(v, dt) {
     const s = G.state;
     switch (v.state) {
         case 'toRoom': {
-            // The booking can be overtaken by events — the player might have demolished the room.
+            // The booking can be overtaken by events. The player might have demolished the room.
             if (!s.outbreak) { v.state = 'leaving'; goTo(v, GATE_TILE); break; }
             if (!v.goal) goTo(v, v.spot);
             const r = stepPath(v, dt);
@@ -288,7 +288,7 @@ function updateCleaner(v, dt) {
                 s.outbreak = null;
                 s.money -= DISINFECT_FEE;
                 bumpNav();
-                G.onToast(`Containment Lab sterilized and reopened — $${DISINFECT_FEE.toLocaleString()}`);
+                G.onToast(`Containment Lab sterilized and reopened, $${DISINFECT_FEE.toLocaleString()}`);
             }
             v.state = 'leaving'; goTo(v, GATE_TILE);
             dirtyUI();
@@ -314,7 +314,7 @@ export function updateVisitors(dt) {
     }
 }
 
-// Routine contractors go home when the building is evacuated — nobody is servicing a centrifuge
+// Routine contractors go home when the building is evacuated. Nobody is servicing a centrifuge
 // while the place burns. The emergency services obviously stay: they arrive *because* of it.
 const EMERGENCY = new Set(['firefighter', 'cleaner']);
 export function clearVisitors(reason) {

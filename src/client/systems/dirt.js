@@ -26,7 +26,7 @@ export function recomputeGrime() {
     const nv = nav();
     let t = 0;
     for (const k in s.dirt) {
-        // A dirty tile that's since had a machine built on it has no floor left to mop — leaving
+        // A dirty tile that's since had a machine built on it has no floor left to mop. Leaving
         // the entry in place meant topDirtTile() (which already skips unreachable tiles) would
         // skip it forever, and that grime would sit there dragging cleanliness down permanently
         // with nothing anyone could ever do about it.
@@ -37,7 +37,7 @@ export function recomputeGrime() {
     s.grime = t;
 }
 // Picks the dirtiest tile nobody is already headed to, so two cleaners never converge on the
-// same spill — a later responder simply doesn't see it as a candidate at all.
+// same spill. A later responder simply doesn't see it as a candidate at all.
 export function topDirtTile() {
     const nv = nav();
     // Ignore only truly trivial dirt. This used to sit at 12, tuned for when multi-slot
@@ -49,7 +49,7 @@ export function topDirtTile() {
     for (const k in G.state.dirt) {
         if (G.state.dirtClaims[k] != null) continue;    // someone's already on their way
         const [x, z] = k.split(',').map(Number);
-        if (nv[z * GRID + x]) continue;         // a machine now covers it — unreachable
+        if (nv[z * GRID + x]) continue;         // a machine now covers it. Unreachable
         if (G.state.dirt[k] > bv) { bv = G.state.dirt[k]; bk = k; }
     }
     if (!bk) return null;

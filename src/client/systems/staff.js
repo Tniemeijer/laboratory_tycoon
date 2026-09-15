@@ -6,13 +6,13 @@ import {
     EVAC_SPEED_MUL,
     BUILD, PROTOCOLS, REAGENTS, REAGENT_BATCH, REAGENT_MIN, REAGENT_PREP_TIME, REAGENT_WATER_COST,
     WATER_BATCH, WATER_MIN, WATER_FILL_TIME, COLD_STORE_THRESHOLD, COLD_STORE_TIME, CAP_LABEL, SURNAMES,
-    BATCH_LOAD_TIME, IDLE_GRACE_PERIOD,
+    BATCH_LOAD_TIME, IDLE_GRACE_PERIOD, STOCK_UNLOAD_TIME, DISMISS_REP_PENALTY,
     SKIN_TONES, HAIR_COLORS,
     SKILL_CAP_ALIAS, SKILL_XP_PER_RUN, SKILL_XP_PER_EXTRA_SAMPLE, SKILL_XP_PER_LEVEL, SKILL_MAX_LEVEL,
     SKILL_SPEED_PER_LEVEL, SKILL_QUALITY_PER_LEVEL
 } from '../data.js';
 import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyUI, cartCapacity, equipCaps } from '../core.js';
-import { GRID, tileToWorld, worldToTile, footTiles, restTile, gateWorld, musterTile } from '../grid.js';
+import { GRID, tileToWorld, worldToTile, footTiles, restTile, stockTile, gateWorld, musterTile } from '../grid.js';
 import { aStar, nearestAccess } from '../pathfind.js';
 import { addDirt, recomputeGrime, topDirtTile } from './dirt.js';
 import { curStep, isInert } from './samples.js';
@@ -20,13 +20,14 @@ import { completeContract } from './contracts.js';
 import { stageSample, batchReady, startRun } from './equipment.js';
 import { isBurning, isQuarantined } from './incidents.js';
 import { underService } from './visitors.js';
+import { addStock } from './economy.js';
 
 const STAFF_SPEED = 2.7;
 
 export function hireStaff() {
     const s = G.state;
-    if (s.staff.length >= maxStaff()) return G.onToast('Staff at capacity — build Staff Quarters', true);
-    if (s.money < s.hireCost) return G.onToast('Not enough money to hire', true);
+    if (s.staff.length >= maxStaff()) return G.onToast('Staff at capacity. Build Staff Quarters', true);
+    if (s.money < s.hireCost) return G.onToast(G.noFunds ? G.noFunds('another scientist') : 'Not enough money', true);
     s.money -= s.hireCost;
     const w = gateWorld();          // walks in the front door, like a new hire should
     s.staff.push({
@@ -43,7 +44,20 @@ export function hireStaff() {
     G.onToast('Hired a scientist');
     dirtyUI();
 }
-// Each capability toggles independently — a worker can be Process + Mechanic but not Clean, say.
+// Letting someone go. Whatever they were carrying goes back in the queue and whatever they'd
+// claimed is released. ResetWorker already does all of that, so firing is that plus removal.
+export function fireStaff(id) {
+    const s = G.state;
+    const w = s.staff.find(x => x.id === id);
+    if (!w) return;
+    resetWorker(w);
+    s.staff = s.staff.filter(x => x !== w);
+    s.reputation = Math.max(0, s.reputation - DISMISS_REP_PENALTY);
+    G.onToast(`${w.name} was let go  -${DISMISS_REP_PENALTY} rep`, true);
+    dirtyUI();
+}
+
+// Each capability toggles independently. A worker can be Process + Mechanic but not Clean, say.
 // Unlike the old exclusive role, there's no single "current role" here on purpose: the plan is to
 // eventually replace this with specialities set at hiring time (a CV-style hire screen) rather
 // than freely reassignable checkboxes, so this stays deliberately simple in the meantime.
@@ -76,6 +90,16 @@ function resetWorker(w) {
         if (e && e.operateClaim === w.id) e.operateClaim = null;
     }
     releaseReservation(w);
+    if (w.job && w.job.crateId != null) {
+        const c = (G.state.deliveries || []).find(x => x.id === w.job.crateId);
+        // A carried crate is put back down where the worker is standing rather than teleporting
+        // to the door — it's a physical box and they were holding it.
+        if (c && c.claimedBy === w.id) {
+            c.claimedBy = null;
+            if (w.carryingCrate) { c.wx = w.wx; c.wz = w.wz; }
+        }
+    }
+    w.carryingCrate = null;
     const ids = w.job ? (w.job.sampleIds || (w.job.coldSampleId != null ? [w.job.coldSampleId] : [])) : [];
     for (const id of ids) {
         const sm = G.state.samples.find(x => x.id === id);
@@ -92,6 +116,11 @@ function refundPrepReservation(w) {
         G.state.ingredients[k] = (G.state.ingredients[k] || 0) + REAGENT_BATCH;
     }
     if (w.job && w.job.water) G.state.water += w.job.water;
+    // The order itself is put back too. The player asked for this batch and hasn't got it.
+    if (w.job && w.job.brewOrder) {
+        const k = w.job.brewOrder;
+        G.state.brewOrders[k] = (G.state.brewOrders[k] || 0) + 1;
+    }
 }
 
 function stepPath(w, dt) {
@@ -114,7 +143,7 @@ function stepPath(w, dt) {
 function setGoalTile(w, tile) { w.goal = tile; w.path = null; }
 
 // A worker's level at a given task (cap), derived from accumulated XP rather than stored
-// directly — keeps the save format simple and means tuning SKILL_XP_PER_LEVEL retroactively
+// directly. Keeps the save format simple and means tuning SKILL_XP_PER_LEVEL retroactively
 // re-levels everyone instead of leaving old saves stuck at stale numbers.
 export function skillCap(cap) { return SKILL_CAP_ALIAS[cap] || cap; }
 function skillLevel(w, cap) {
@@ -142,8 +171,8 @@ function frontTiles(e) {
     }
     return out;
 }
-// Where a worker should stand to use this machine. Strongly prefers the front — the side the door,
-// screen or hatch is actually on — because picking whichever tile merely happened to be nearest
+// Where a worker should stand to use this machine. Strongly prefers the front. The side the door,
+// screen or hatch is actually on, because picking whichever tile merely happened to be nearest
 // had staff working fridges through the back panel. Falls back to any reachable side rather than
 // refusing the job outright, so a machine shoved against a wall still gets used.
 function accessTile(e, from) {
@@ -164,7 +193,7 @@ function freeSlots(e) { return (BUILD[e.type].slots || 0) - (e.processing ? e.pr
 // rather than piling up outside a door that won't open.
 export function stationUsable(e) { return !isBurning(e) && !isQuarantined(e) && !underService(e); }
 function stationsFor(cap) { return G.state.equipment.filter(e => stationUsable(e) && equipCaps(e).includes(cap)); }
-// A station's batch capacity is shared across every cap it serves — a bench holding 3 samples
+// A station's batch capacity is shared across every cap it serves. A bench holding 3 samples
 // for prep has no room left for analysis either, they're the same 3 physical slots. Occupancy
 // counts what's actually staged there (any cap) plus samples already claimed and walking toward
 // ANY of that station's caps but not yet arrived (we don't know which specific station a claimed
@@ -207,7 +236,7 @@ function bestStation(cap, w) {
     return best;
 }
 
-// Mop Closets and Sinks both count as "clean supply" for a mopping speed bonus — restocking
+// Mop Closets and Sinks both count as "clean supply" for a mopping speed bonus. Restocking
 // mops or rinsing them out, either way it's faster to mop near a water source.
 function nearCleanSupply(w) {
     for (const e of G.state.equipment) {
@@ -219,25 +248,49 @@ function nearCleanSupply(w) {
     return false;
 }
 
-// which reagents does an active contract still need, cheapest-to-restock first
+// Which reagent to brew next. Strictly what the player has ordered — the lab no longer tops
+// itself up. Reagents perish, so deciding *when* to brew is the whole point of the ingredient
+// economy; a lab that brewed automatically the moment a stock solution dipped made that decision
+// for you and then quietly binned the surplus.
 function reagentToPrep() {
     const s = G.state;
-    if (!s.autoPrep) return null;
     if (s.water < REAGENT_WATER_COST) return null;               // no distilled water, no prep
-    const needed = new Set();
-    for (const c of s.contracts)
-        for (const st of PROTOCOLS[c.proto].steps) if (st.reagent) needed.add(st.reagent);
-    let want = null, worst = REAGENT_MIN;
-    for (const k of needed) {
-        const ing = REAGENTS[k].ingredient;
-        if ((s.ingredients[ing] || 0) < REAGENT_BATCH) continue;     // out of raw material
-        const eff = reagentCount(k) + (s.prepping[k] || 0) * REAGENT_BATCH;
-        if (eff < worst) { worst = eff; want = k; }
+    let want = null, mostWanted = 0;
+    for (const [k, r] of Object.entries(REAGENTS)) {
+        const queued = (s.brewOrders && s.brewOrders[k]) || 0;
+        if (queued <= 0) continue;
+        if ((s.ingredients[r.ingredient] || 0) < REAGENT_BATCH) continue;     // out of raw material
+        if (queued > mostWanted) { mostWanted = queued; want = k; }
     }
     return want;
 }
 
-// Claims the spill for this worker so topDirtTile() won't hand it to anyone else — a later
+// A crate waiting at the door. The stockroom is an annex that always exists, so unlike the old
+// buildable version there's always somewhere to take it. What varies is how much it holds.
+let _stockSpot = 0;
+function pickCrateJob(w) {
+    const s = G.state;
+    if (!s.deliveries || !s.deliveries.length) return false;
+    const from = worldToTile(w.wx, w.wz);
+    let crate = null, bestD = Infinity;
+    for (const c of s.deliveries) {
+        if (c.claimedBy) continue;
+        const t = worldToTile(c.wx, c.wz);
+        const d = Math.abs(t.tx - from.tx) + Math.abs(t.tz - from.tz);
+        if (d < bestD) { bestD = d; crate = c; }
+    }
+    if (!crate) return false;
+    crate.claimedBy = w.id;
+    // Spread arrivals across the annex's free tiles so two people unloading don't stand in each
+    // other's models on the same square.
+    w.job = { crateId: crate.id, stockTile: stockTile(s, _stockSpot++) };
+    const t = worldToTile(crate.wx, crate.wz);
+    setGoalTile(w, [t.tx, t.tz]);
+    w.state = 'toCrate';
+    return true;
+}
+
+// Claims the spill for this worker so topDirtTile() won't hand it to anyone else. A later
 // responder to the same mess simply never sees it as a candidate.
 function claimMop(w, dirtiest) {
     w.job = { mopKey: dirtiest.key };
@@ -288,7 +341,7 @@ function assignJob(w) {
     if (caps.process && pickSampleJob(w)) return true;
     if (caps.process && s.coldStore) {
         // A sample also becomes fridge-worthy once its next station already has enough staged
-        // for its next run — no benefit rushing more over right now, so chill the surplus
+        // for its next run, no benefit rushing more over right now, so chill the surplus
         // instead of letting it pile up unrefrigerated at a machine that doesn't need it yet.
         // Of everything eligible, shelve the most urgent one first — same priority used to pick
         // what to process next, so a sample about to blow its deadline doesn't sit around behind
@@ -318,6 +371,10 @@ function assignJob(w) {
             }
         }
     }
+    // Putting a delivery away comes before fetching more samples: crates block the doorway, their
+    // contents can't be used until they're on a shelf, and a run that needs them is stalled in the
+    // meantime. Cheap to check — usually there's nothing waiting.
+    if (caps.process && pickCrateJob(w)) return true;
     if (caps.process && s.water < WATER_MIN) {
         const from = worldToTile(w.wx, w.wz);
         for (const e of s.equipment) {
@@ -343,9 +400,10 @@ function assignJob(w) {
                 if ((s.ingredients[ing] || 0) < REAGENT_BATCH || s.water < REAGENT_WATER_COST) break;   // depleted since reagentToPrep() checked
                 s.ingredients[ing] -= REAGENT_BATCH;
                 s.water -= REAGENT_WATER_COST;
+                s.brewOrders[rk] = Math.max(0, (s.brewOrders[rk] || 0) - 1);   // claimed off the order book
                 e.reserved = (e.reserved || 0) + 1;
                 w.reservedStation = e.id;
-                w.job = { prepReagent: rk, stationId: e.id, ingredient: ing, water: REAGENT_WATER_COST };
+                w.job = { prepReagent: rk, stationId: e.id, ingredient: ing, water: REAGENT_WATER_COST, brewOrder: rk };
                 s.prepping[rk] = (s.prepping[rk] || 0) + 1;
                 setGoalTile(w, acc); w.state = 'toPrep';
                 return true;
@@ -358,6 +416,17 @@ function assignJob(w) {
     return false;
 }
 
+// Is there genuinely nothing coming? Anything staged is sitting on a batch timer and will want
+// somebody shortly; anything queued or waiting at the door wants somebody now. Cheap enough to
+// run per idle worker per tick. These lists are short, and it short-circuits on the first hit.
+function labIsQuiet() {
+    const s = G.state;
+    if (s.samples.some(sm => sm.state === 'queued' || sm.state === 'staged')) return false;
+    if (s.deliveries && s.deliveries.length) return false;
+    if (s.equipment.some(e => e.staged && e.staged.length)) return false;
+    return true;
+}
+
 export function updateStaff(dt) {
     const s = G.state;
     let restIdx = 0;
@@ -368,12 +437,12 @@ export function updateStaff(dt) {
         if (!stationsFor(cap).length && !s.warns['notool_' + cap]) {
             s.warns['notool_' + cap] = 1;
             // Distinguish "you never built one" from "the one you have is shut inside a sealed
-            // room" — the advice is completely different, and telling someone mid-outbreak to go
+            // room". The advice is completely different, and telling someone mid-outbreak to go
             // and build another Flow Hood is the wrong one.
             const shutAway = s.equipment.some(e => !stationUsable(e) && equipCaps(e).includes(cap));
             G.onToast(shutAway
-                ? `The only machine for the "${CAP_LABEL[cap]}" step is out of reach — work is on hold`
-                : `No machine for the "${CAP_LABEL[cap]}" step — build one`, true);
+                ? `The only machine for the "${CAP_LABEL[cap]}" step is out of reach. Work is on hold`
+                : `No machine for the "${CAP_LABEL[cap]}" step. Build one`, true);
         }
     }
 
@@ -403,12 +472,17 @@ export function updateStaff(dt) {
                     restIdx++;
                     stepPath(w, dt);
                 } else {
-                    // A newly-idle worker waits here a moment before actually setting off for
-                    // the break room — "nothing to do" is often momentary (they just staged the
-                    // sample that'll complete a batch, say), and committing to the walk straight
-                    // away meant they'd often be turned right back around a second later.
+                    // A worker with nothing to do right now stays exactly where they are. They
+                    // only set off for the break room when the lab itself is quiet. Nothing
+                    // staged and waiting on a batch timer, nothing queued, no crates to put away.
+                    //
+                    // Standing still is the important half. "Nothing to do" is usually momentary:
+                    // someone stages the sample that completes a batch, has a few seconds spare
+                    // while BATCH_MAX_WAIT runs down, and the old code sent them off to the break
+                    // room for a coffee quote, only to turn them round before they arrived. The
+                    // round trip was pure noise, and it read as the staff being scatterbrained.
                     w.idleTimer = (w.idleTimer || 0) + dt;
-                    if (w.idleTimer > IDLE_GRACE_PERIOD) {
+                    if (w.idleTimer > IDLE_GRACE_PERIOD && labIsQuiet()) {
                         const [rx, rz] = restTile(s, restIdx++); setGoalTile(w, [rx, rz]); w.state = 'resting';
                         w.idleTimer = 0;
                     }
@@ -419,6 +493,40 @@ export function updateStaff(dt) {
         }
 
         switch (w.state) {
+            case 'toCrate': {
+                const c = (s.deliveries || []).find(x => x.id === w.job.crateId);
+                if (!c) { resetWorker(w); break; }
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') {
+                    w.carryingCrate = c.id;
+                    setGoalTile(w, w.job.stockTile); w.state = 'toStock';
+                }
+                break;
+            }
+            case 'toStock': {
+                const c = (s.deliveries || []).find(x => x.id === w.job.crateId);
+                if (!c) { resetWorker(w); break; }
+                c.wx = w.wx; c.wz = w.wz;                     // the crate travels with them
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') { w.state = 'stocking'; w.tendTimer = 0; }
+                break;
+            }
+            case 'stocking': {
+                w.tendTimer += dt;
+                if (w.tendTimer < STOCK_UNLOAD_TIME) break;
+                const c = (s.deliveries || []).find(x => x.id === w.job.crateId);
+                if (c) {
+                    addStock(c.key, c.qty);
+                    s.deliveries = s.deliveries.filter(x => x !== c);
+                    s.stats.shelved = (s.stats.shelved || 0) + 1;
+                }
+                w.carryingCrate = null;
+                resetWorker(w);
+                dirtyUI();
+                break;
+            }
             case 'toMop': {
                 const r = stepPath(w, dt);
                 if (r === 'blocked') resetWorker(w);
@@ -475,7 +583,7 @@ export function updateStaff(dt) {
                 break;
             }
             case 'atStation': {
-                // The worker's job ends at drop-off — no more standing around tending a whole
+                // The worker's job ends at drop-off, no more standing around tending a whole
                 // run. Each sample waits in the station's staging area until a worker (maybe this
                 // one, maybe another — see findReadyBatchJob/'toOperate' below) comes back to
                 // actually start a run once enough of the same request pile up, or the oldest
@@ -505,7 +613,7 @@ export function updateStaff(dt) {
                 w.tendTimer += dt;
                 if (w.tendTimer < BATCH_LOAD_TIME) break;
                 const entry = startRun(e, group);
-                // The worker who actually started the run gets skill credit for it — a leveled-up
+                // The worker who actually started the run gets skill credit for it. A leveled-up
                 // specialist runs this cap faster and a touch cleaner than a first-timer would.
                 if (entry) {
                     const lvl = skillLevel(w, entry.cap);
@@ -533,7 +641,7 @@ export function updateStaff(dt) {
             case 'tending': {
                 const e = s.equipment.find(x => x.id === w.job.operateId);
                 const stillRunning = e && e.processing && e.processing.includes(w.job.tendEntry);
-                if (!stillRunning) resetWorker(w);   // run finished (or the machine's gone) — free up
+                if (!stillRunning) resetWorker(w);   // run finished (or the machine's gone), free up
                 break;
             }
             case 'toPrep': {

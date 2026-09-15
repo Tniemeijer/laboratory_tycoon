@@ -5,15 +5,17 @@
 import {
     G, BUILD, PROTOCOLS, UPGRADES, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, CAP_LABEL,
     orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
+    orderBrew, BREW_QUEUE_MAX, REAGENT_BATCH, ROOM_DOOR_REQ,
     WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, LOAN_INTEREST_RATE, LOAN_MAX,
     SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP, LOAN_INTEREST_DAYS, LOAN_STEP,
     interestDue, nextInterestDay, mechanicQuote, mechanicOnSite, alarmReliability,
     labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps,
     cleanliness, ownedTileCount, utilityBreakdown, reagentCount,
-    acceptContract, hireStaff, toggleStaffCap, buyUpgrade, buyZone, toggleAutoPrep, toggleColdStore, callMechanic,
+    acceptContract, cancelContract, cancelCost, hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, toggleColdStore, callMechanic,
     borrowLoan, repayLoan
 } from '../game.js';
 import { sealedRooms } from '../grid.js';
+import { restartTutorial } from './tutorial.js';
 
 const CAT_ORDER = ['Processing', 'Storage', 'Utility'];
 // Rooms have no caps of their own to list — what they're worth is whatever they add to a machine
@@ -70,6 +72,136 @@ const needsChain = (protoKey) => {
         bits.push(`<span class="cap ${have ? 'have' : 'miss'}">${SUPPLIES[k].name}</span>`);
     }
     return `<div class="chain"><span class="dim">needs</span>${bits.join('')}</div>`;
+};
+
+// What would it actually take to run this protocol? Turns the red links in the chain above into
+// instructions, "Build a Flow Hood", "Stand a Microscope in a Dark Room", "Order Slides". Rather
+// than leaving the player to work out which machine grants "Contained Prep" from the Build menu.
+//
+// Three shapes of answer, in the order they're worth telling someone about:
+//   · no machine grants the cap at all                 -> build one
+//   · a machine grants it, but only inside a room      -> build the machine, or lay the room
+//   · the machine exists, the consumable doesn't       -> order it / brew it
+export function contractTasks(protoKey) {
+    const s = G.state;
+    const owned = ownedCaps();
+    // Two kinds of entry. A `todo` is something the player has to act on. A `waiting` is something
+    // already in hand that simply hasn't landed yet: stock on order, a batch on the bench. Both
+    // block the job, so both have to be visible — suppressing the second made the panel claim
+    // "nothing blocking" while a run sat stalled waiting for slides to arrive.
+    const tasks = [];
+    const todo = (text) => tasks.push({ text, waiting: false });
+    const waiting = (text) => tasks.push({ text, waiting: true });
+    const machinesFor = (cap) => Object.entries(BUILD).filter(([, b]) => (b.caps || []).includes(cap));
+    const roomGrantsFor = (cap) => {
+        const out = [];
+        for (const [kind, grants] of Object.entries(ROOM_BONUS_CAP))
+            for (const [type, granted] of Object.entries(grants)) if (granted === cap) out.push({ kind, type });
+        return out;
+    };
+    const roomName = (kind) => Object.entries(BUILD).find(([, b]) => b.room && b.kind === kind)?.[1].name || kind;
+
+    for (const st of PROTOCOLS[protoKey].steps) {
+        if (owned.has(st.cap)) continue;
+        const direct = machinesFor(st.cap);
+        if (direct.length) {
+            todo(`Build a <b>${direct.map(([, b]) => b.name).join('</b> or <b>')}</b>, for the ${CAP_LABEL[st.cap]} step.`);
+            continue;
+        }
+        // Only a machine standing inside a room can do it.
+        for (const { kind, type } of roomGrantsFor(st.cap)) {
+            const hasMachine = s.equipment.some(e => e.type === type);
+            const hasRoom = s.equipment.some(e => BUILD[e.type].room && BUILD[e.type].kind === kind);
+            const rn = roomName(kind);
+            if (!hasMachine && !hasRoom) todo(`Build a <b>${BUILD[type].name}</b> and lay a <b>${rn}</b> around it, for the ${CAP_LABEL[st.cap]} step.`);
+            else if (!hasMachine) todo(`Build a <b>${BUILD[type].name}</b> inside your <b>${rn}</b>, for the ${CAP_LABEL[st.cap]} step.`);
+            else if (!hasRoom) todo(`Lay a <b>${rn}</b> around your <b>${BUILD[type].name}</b>, for the ${CAP_LABEL[st.cap]} step.`);
+            else todo(`Move your <b>${BUILD[type].name}</b> onto the <b>${rn}</b> floor. It only does ${CAP_LABEL[st.cap]} while standing on it.`);
+        }
+    }
+    // A sealed room grants nothing and is easy to miss, so call it out here too.
+    for (const r of sealedRooms(s)) {
+        const rn = roomName(r.kind);
+        const need = ROOM_DOOR_REQ[r.kind] === 'airlock' ? 'Airlock' : 'Door';
+        todo(`Put ${need === 'Airlock' ? 'an' : 'a'} <b>${need}</b> in your <b>${rn}</b>. A sealed room grants nothing.`);
+    }
+    // Consumables and reagents: a run won't start without them at all.
+    const sup = new Set(['disposable']);
+    const reag = [];
+    for (const st of PROTOCOLS[protoKey].steps) {
+        if (SUPPLY_FOR_CAP[st.cap]) sup.add(SUPPLY_FOR_CAP[st.cap]);
+        if (st.reagent && !reag.includes(st.reagent)) reag.push(st.reagent);
+    }
+    // Anything already bought is already handled: still on order, or sitting in a crate by the
+    // door waiting to be shelved. Judging by shelf contents alone tells the player to re-order
+    // what's already on its way.
+    const incoming = (key) => {
+        let n = 0;
+        for (const o of s.orders || []) if (o.key === key) n += o.qty;
+        for (const c of s.deliveries || []) if (c.key === key) n += c.qty;
+        return n;
+    };
+    // Says where it actually is, so "waiting" means something concrete rather than "trust me".
+    // Returns the tail only: supply names are plural ("Slides are …") and ingredient names are
+    // singular ("Its Solvent Base is …"), so the verb belongs to the caller.
+    const arrivalOf = (key) => {
+        const crates = (s.deliveries || []).filter(c => c.key === key).length;
+        if (crates) return `in ${crates > 1 ? `${crates} crates` : 'a crate'} by the door, waiting to be put away`;
+        const days = (s.orders || []).filter(o => o.key === key).map(o => o.day);
+        if (days.length) return `on order, arriving Day ${Math.min(...days)}`;
+        return null;
+    };
+    for (const k of sup) {
+        if (stockCount(k) > 0) continue;
+        const due = arrivalOf(k);
+        if (due) waiting(`<b>${SUPPLIES[k].name}</b> are ${due}.`);
+        else todo(`Order <b>${SUPPLIES[k].name}</b> in <b>Stock</b>. Runs won't start without them.`);
+    }
+
+    let needsWater = false;
+    for (const k of reag) {
+        // A batch already on the bench counts as done. Its ingredient was consumed the moment a
+        // scientist picked the job up (see staff.js), so going by the shelf would report the raw
+        // material as missing and send the player off to re-order it — while the reagent they
+        // asked for is being made three tiles away.
+        if (reagentCount(k) > 0) continue;
+        const ing = REAGENTS[k].ingredient;
+        const brewing = (s.prepping && s.prepping[k]) || 0;
+        const queued = (s.brewOrders && s.brewOrders[k]) || 0;
+        const ingReady = stockCount(ing) >= REAGENT_BATCH;
+        const ingDue = arrivalOf(ing);
+        needsWater = true;
+        // On the bench right now. Its ingredient was consumed when a scientist picked the job up,
+        // so going by shelf contents alone would report the raw material as missing.
+        if (brewing > 0) { waiting(`<b>${REAGENTS[k].name}</b> is being brewed now.`); continue; }
+        if (queued > 0) {
+            if (ingReady) waiting(`<b>${REAGENTS[k].name}</b> is on the order book, waiting for a free scientist.`);
+            else if (ingDue) waiting(`<b>${REAGENTS[k].name}</b> is on the order book. Its <b>${INGREDIENTS[ing].name}</b> is ${ingDue}.`);
+            else todo(`Order <b>${INGREDIENTS[ing].name}</b> in <b>Stock</b>. Your <b>${REAGENTS[k].name}</b> order is waiting on it.`);
+            continue;
+        }
+        if (ingReady) todo(`Order a batch of <b>${REAGENTS[k].name}</b> in <b>Stock</b>. Nothing is brewed unless you ask.`);
+        else if (ingDue) todo(`Order a batch of <b>${REAGENTS[k].name}</b> in <b>Stock</b>. Its <b>${INGREDIENTS[ing].name}</b> is ${ingDue}.`);
+        else todo(`Order <b>${INGREDIENTS[ing].name}</b> in <b>Stock</b>, then brew <b>${REAGENTS[k].name}</b>.`);
+    }
+    // Brewing anything takes distilled water, and a lab with no Sink and an empty tank stalls
+    // silently — the brew order just never gets picked up.
+    if (needsWater && s.water < REAGENT_WATER_COST && !s.equipment.some(e => BUILD[e.type].kind === 'water'))
+        todo(`Build a <b>Sink</b>, or order <b>Distilled Water</b>. Brewing needs it and the tank is empty.`);
+    if (!s.staff.length) todo(`Hire a scientist in <b>Staff</b>. Nothing moves without one.`);
+    return tasks;
+}
+// Renders the list, or nothing at all when the lab is ready for this job.
+const taskList = (protoKey) => {
+    const tasks = contractTasks(protoKey);
+    if (!tasks.length) return `<div class="tasks ready">✓ Your lab can run this</div>`;
+    const todos = tasks.filter(t => !t.waiting), waits = tasks.filter(t => t.waiting);
+    let h = `<div class="tasks">`;
+    if (todos.length) h += `<div class="t-head">To run this you still need:</div>` +
+        todos.map(t => `<div class="t-item">☐ ${t.text}</div>`).join('');
+    if (waits.length) h += `<div class="t-head wait">On its way:</div>` +
+        waits.map(t => `<div class="t-item wait">⏳ ${t.text}</div>`).join('');
+    return h + `</div>`;
 };
 
 const capChain = (protoKey) => {
@@ -132,7 +264,7 @@ export const BUILDERS = {
                 <div class="c-top"><span class="c-name">${o.name}</span><span class="pay">+$${o.reward}</span></div>
                 <div class="c-org">${o.org} · ${o.required}× · +${o.repReward} rep · Day ${o.deadline}</div>
                 <div class="chain">${capChain(o.proto)}</div>
-                ${needsChain(o.proto)}
+                ${taskList(o.proto)}
                 <button class="mini" data-accept="${o.id}">Accept</button>
             </div>`;
         }
@@ -149,7 +281,8 @@ export const BUILDERS = {
                 <div class="pbar"><i style="width:${(c.done / c.required * 100).toFixed(0)}%"></i></div>
                 <div class="c-org">${c.done}/${c.required} done · ${left} day${left === 1 ? '' : 's'} left${arrivalNote}${c.spoiledCount ? ` · <span class="warnline">${c.spoiledCount} spoiled (cuts payout)</span>` : ''}</div>
                 <div class="chain">${capChain(c.proto)}</div>
-                ${needsChain(c.proto)}
+                ${taskList(c.proto)}
+                <button class="mini danger" data-cancel="${c.id}">Cancel contract (-$${cancelCost(c).fee.toLocaleString()})</button>
             </div>`;
         }
         h += `</div>`;
@@ -159,7 +292,7 @@ export const BUILDERS = {
     staff() {
         const s = G.state;
         let h = `<div class="dd-head">Staff <span class="dim">${s.staff.length}/${maxStaff()}</span></div>`;
-        h += `<button class="wide" data-hire ${s.staff.length >= maxStaff() || s.money < s.hireCost ? 'disabled' : ''}>Hire Scientist — $${s.hireCost}</button>`;
+        h += `<button class="wide" data-hire ${s.staff.length >= maxStaff() || s.money < s.hireCost ? 'disabled' : ''}>Hire Scientist, $${s.hireCost}</button>`;
         h += `<div class="dd-sub">Cold storage <button class="tgl ${s.coldStore ? 'on' : ''}" data-coldstore>store perishables ${s.coldStore ? 'ON' : 'OFF'}</button></div>
               <div class="c-org">${coldUsed()}/${coldCapacity()} fridge/freezer shelves in use. When on, a free scientist will shelve a fading sample before it's needed, instead of leaving it to rot in the queue.</div>`;
         h += `<div class="dd-sub">Scientists <span class="dim">tick what each one is allowed to do</span></div><div class="col">`;
@@ -171,6 +304,7 @@ export const BUILDERS = {
                     `<button class="r cb ${w.caps[c] ? 'on' : ''}" data-cap="${w.id}:${c}">${w.caps[c] ? '☑' : '☐'} ${STAFF_CAP_LABEL[c]}</button>`).join('')}
                 </div>
                 ${skillBadges(w)}
+                <button class="mini danger" data-fire="${w.id}">Fire</button>
             </div>`;
         }
         if (!s.staff.length) h += `<div class="empty">No scientists yet</div>`;
@@ -182,11 +316,22 @@ export const BUILDERS = {
         const s = G.state;
         const hasSink = s.equipment.some(e => BUILD[e.type].kind === 'water');
         const used = stockUsed(), cap = stockCapacity(), pct = Math.min(100, Math.round(used / cap * 100));
-        let h = `<div class="dd-head">Stock <button class="tgl ${s.autoPrep ? 'on' : ''}" data-autoprep>auto-prep ${s.autoPrep ? 'ON' : 'OFF'}</button></div>`;
+        const lv = s.upgrades.storage || 0, maxLv = UPGRADES.storage.max;
+        const crates = (s.deliveries || []).length;
+        let h = `<div class="dd-head">Stock</div>`;
 
-        h += `<div class="meter-lbl">Stockroom <b class="${pct > 90 ? 'bad' : pct > 70 ? 'mid' : 'good'}">${used}/${cap}</b></div>
-              <div class="meter"><i style="width:${pct}%" class="${pct > 90 ? 'bad' : pct > 70 ? 'mid' : 'good'}"></i></div>
-              <div class="c-org">Prices move every morning and orders land the next day, so it pays to buy ahead while something's cheap — but anything on order reserves its shelf space now. More room under <b>Upgrades → Stockroom</b>.</div>`;
+        h += `<div class="meter-lbl">Shelf space <b class="${pct > 90 ? 'bad' : pct > 70 ? 'mid' : 'good'}">${used}/${cap}</b></div>
+              <div class="meter"><i style="width:${pct}%" class="${pct > 90 ? 'bad' : pct > 70 ? 'mid' : 'good'}"></i></div>`;
+        h += `<div class="c-org">The stockroom is the annex east of the entrance${lv ? ` — racked out to level ${lv}` : ', currently one rack by the door'}. ${lv < maxLv ? 'Extend it under <b>Upgrades → Stockroom</b>. ' : ''}Prices move every morning and orders land the next day, so it pays to buy ahead while something's cheap, but anything on order, or still sitting in a crate by the door, reserves its shelf space now.</div>`;
+
+        if (crates) {
+            h += `<div class="dd-sub">At the door <span class="dim">waiting to be put away</span></div><div class="col">`;
+            const byKey = {};
+            for (const c of s.deliveries) byKey[c.key] = (byKey[c.key] || 0) + c.qty;
+            for (const [k, qty] of Object.entries(byKey))
+                h += `<div class="reg"><span>${qty}× ${(INGREDIENTS[k] || SUPPLIES[k]).name}</span><span class="dim">in crates</span></div>`;
+            h += `<div class="c-org">${crates} crate${crates > 1 ? 's' : ''} stacked in the doorway. A free scientist will carry them through to the stockroom. None of it can be used until they do.</div></div>`;
+        }
 
         if (s.orders && s.orders.length) {
             h += `<div class="dd-sub">On order</div><div class="col">`;
@@ -200,14 +345,19 @@ export const BUILDERS = {
         const row = (key, item) => {
             const price = unitPrice(key), tr = priceTrend(key), have = stockCount(key);
             const arrow = tr > 0 ? '<span class="up">▲</span>' : tr < 0 ? '<span class="down">▼</span>' : '<span class="dim">–</span>';
-            const qty = 10;
+            // Water goes to the tank, not the shelf, so it's never space-limited. For everything
+            // else, offer what will actually fit rather than a dead "No space" button. A partial
+            // order is nearly always what the player wanted anyway, and a disabled button with no
+            // explanation is a worse answer than a smaller one.
+            const free = key === 'water' ? 10 : stockFree();
+            const qty = Math.min(10, Math.max(0, free));
             const cost = price * qty;
-            const tooBig = qty > stockFree(), poor = s.money < cost;
+            const full = qty <= 0, poor = s.money < cost;
             return `<div class="reg buy">
                 <span>${item.name}<span class="dim"> · ${have} ${item.unit}</span><br>
                     <span class="dim">$${price}/unit ${arrow}</span></span>
-                <button class="mini buyb ${poor || tooBig ? 'poor' : ''}" data-order="${key}" ${tooBig ? 'disabled' : ''}>
-                    ${tooBig ? 'No space' : `Order ×${qty} — $${cost.toLocaleString()}`}
+                <button class="mini buyb ${poor || full ? 'poor' : ''}" data-order="${key}" data-qty="${qty}" ${full ? 'disabled' : ''}>
+                    ${full ? 'Shelf full' : `Order ×${qty}, $${cost.toLocaleString()}`}
                 </button>
             </div>`;
         };
@@ -226,16 +376,30 @@ export const BUILDERS = {
 
         h += `<div class="dd-sub">Distilled Water</div><div class="col">`;
         h += row('water', WATER_ITEM);
-        if (!hasSink) h += `<div class="c-org warnline">No Sink built, so none of this is being made in-house — buy it in, or build a Sink under Utility and a scientist will draw it for free.</div>`;
-        else if (s.water < WATER_MIN) h += `<div class="c-org">Running low — a free scientist will top it up at the sink, or buy a batch in to bridge the gap.</div>`;
+        if (!hasSink) h += `<div class="c-org warnline">No Sink built, so none of this is being made in-house. Buy it in, or build a Sink under Utility and a scientist will draw it for free.</div>`;
+        else if (s.water < WATER_MIN) h += `<div class="c-org">Running low. A free scientist will top it up at the sink, or buy a batch in to bridge the gap.</div>`;
         h += `</div>`;
 
-        h += `<div class="dd-sub">Stock Solutions (perishable)</div><div class="col">`;
+        h += `<div class="dd-sub">Stock Solutions <span class="dim">brewed to order, then they perish</span></div><div class="col">`;
         for (const [k, r] of Object.entries(REAGENTS)) {
             const list = s.reagents.filter(x => x.type === k).sort((a, b) => a.expire - b.expire);
             const next = list[0] ? ` · next expires Day ${list[0].expire}` : '';
-            h += `<div class="reg"><span>${r.name} <span class="dim">(${INGREDIENTS[r.ingredient].name} + ${REAGENT_WATER_COST} water)</span></span><span class="dim">${list.length} in stock${next}</span></div>`;
+            const queued = (s.brewOrders && s.brewOrders[k]) || 0;
+            const inFlight = (s.prepping && s.prepping[k]) || 0;
+            const ing = INGREDIENTS[r.ingredient];
+            const haveIng = stockCount(r.ingredient);
+            const canBrew = haveIng >= REAGENT_BATCH;
+            h += `<div class="reg"><span>${r.name}<span class="dim"> · ${list.length} in stock${next}</span><br>
+                    <span class="dim">${REAGENT_BATCH} per batch from ${REAGENT_BATCH}× ${ing.name} + ${REAGENT_WATER_COST} water</span></span>
+                  <span class="brew">
+                    <button class="mini adj" data-brew="${k}:-1" ${queued <= 0 ? 'disabled' : ''}>−</button>
+                    <span class="brew-n ${queued ? 'on' : ''}">${queued}</span>
+                    <button class="mini adj" data-brew="${k}:1" ${queued >= BREW_QUEUE_MAX ? 'disabled' : ''}>+</button>
+                  </span></div>`;
+            if (queued || inFlight)
+                h += `<div class="c-org">${queued ? `${queued} batch${queued > 1 ? 'es' : ''} ordered` : 'Order filled'}${inFlight ? `, ${inFlight} being brewed now` : ''}.${!canBrew && queued ? ` <b class="bad">Waiting on ${ing.name}</b>, only ${haveIng} in stock.` : ''}</div>`;
         }
+        h += `<div class="c-org">Nothing is brewed unless you ask for it. Order a batch and a free scientist takes the ingredients to a bench. They go off after a few days, so brewing early is as wasteful as brewing late is slow.</div>`;
         h += `</div>`;
         return h;
     },
@@ -272,20 +436,20 @@ export const BUILDERS = {
         if (machines.length) {
             h += `<div class="dd-sub">Equipment</div>`;
             if (broken.length)
-                h += `<div class="c-org warnline">Broken down: ${broken.map(e => BUILD[e.type].name).join(', ')} — dead until a mechanic's been in.</div>`;
+                h += `<div class="c-org warnline">Broken down: ${broken.map(e => BUILD[e.type].name).join(', ')}. Dead until a mechanic's been in.</div>`;
             if (worn.length)
                 h += `<div class="c-org">Showing wear: ${worn.map(e => `${BUILD[e.type].name} (${Math.round(e.condition)}%)`).join(', ')}.</div>`;
             if (!broken.length && !worn.length) h += `<div class="c-org">All ${machines.length} machines in good condition.</div>`;
             const q = mechanicQuote(), onSite = mechanicOnSite();
             if (onSite) {
-                h += `<div class="c-org">The mechanic is on the floor now — ${onSite.left} machine${onSite.left === 1 ? '' : 's'} still to get to. Each one is billed as they finish it.</div>`;
+                h += `<div class="c-org">The mechanic is on the floor now, ${onSite.left} machine${onSite.left === 1 ? '' : 's'} still to get to. Each one is billed as they finish it.</div>`;
                 h += `<button class="mini" disabled>Mechanic on site</button>`;
             } else if (s.mechanicDay != null) {
-                h += `<div class="c-org">Mechanic booked for <b>Day ${s.mechanicDay}</b> — they'll let themselves in that morning and work down the list on the floor, machine by machine.</div>`;
+                h += `<div class="c-org">Mechanic booked for <b>Day ${s.mechanicDay}</b>. They'll let themselves in that morning and work down the list on the floor, machine by machine.</div>`;
                 h += `<button class="mini" disabled>Mechanic booked</button>`;
             } else if (q.broken || q.worn) {
-                h += `<div class="c-org">A call-out covers the lot in one visit: ${q.broken} to repair, ${q.worn} to service. The fee is charged per visit, so there's a saving in letting a couple pile up — as long as you can spare the machines. They work in the open, one machine at a time, and whatever they're stood at can't be used until they've moved on.</div>`;
-                h += `<button class="mini" data-mech>Call a mechanic — about $${q.cost.toLocaleString()}, arrives Day ${s.day + 1}</button>`;
+                h += `<div class="c-org">A call-out covers the lot in one visit: ${q.broken} to repair, ${q.worn} to service. The fee is charged per visit, so there's a saving in letting a couple pile up. As long as you can spare the machines. They work in the open, one machine at a time, and whatever they're stood at can't be used until they've moved on.</div>`;
+                h += `<button class="mini" data-mech>Call a mechanic. About $${q.cost.toLocaleString()}, arrives Day ${s.day + 1}</button>`;
             }
         }
 
@@ -297,11 +461,11 @@ export const BUILDERS = {
             h += `<div class="c-org warnline">No fire alarm. Worn equipment can catch fire, and without one nobody evacuates until you notice and press the button yourself. Build one from Build → Utility.</div>`;
         } else {
             const rel = Math.round(alarmReliability() * 100);
-            h += `<div class="c-org">${alarms.length} fire alarm${alarms.length > 1 ? 's' : ''} — about <b class="${rel < 50 ? 'bad' : rel < 80 ? 'mid' : 'good'}">${rel}%</b> likely to trip and call the brigade for you. Servicing them raises that.</div>`;
+            h += `<div class="c-org">${alarms.length} fire alarm${alarms.length > 1 ? 's' : ''}. About <b class="${rel < 50 ? 'bad' : rel < 80 ? 'mid' : 'good'}">${rel}%</b> likely to trip and call the brigade for you. Servicing them raises that.</div>`;
         }
         const sealed = sealedRooms(s);
         if (sealed.length)
-            h += `<div class="c-org warnline">${sealed.length} room${sealed.length > 1 ? 's have' : ' has'} no way in — place a Door (or an Airlock, for a Cleanroom or Containment Lab) on one of its tiles or nothing inside will ever be used.</div>`;
+            h += `<div class="c-org warnline">${sealed.length} room${sealed.length > 1 ? 's have' : ' has'} no way in. Place a Door (or an Airlock, for a Cleanroom or Containment Lab) on one of its tiles or nothing inside will ever be used.</div>`;
         const contain = s.equipment.filter(e => BUILD[e.type].kind === 'contain');
         if (contain.length && !s.outbreak)
             h += `<div class="c-org">Containment floor is clear. Neglected equipment standing on it can breach and seal the room.</div>`;
@@ -310,7 +474,7 @@ export const BUILDERS = {
 
         h += `<div class="dd-sub">Finance</div>`;
         if (s.loan > 0) {
-            h += `<div class="c-org">Loan: <b class="${s.loan > 20000 ? 'bad' : 'mid'}">$${Math.round(s.loan).toLocaleString()}</b> owed. Interest of <b>$${interestDue().toLocaleString()}</b> is taken in cash every ${LOAN_INTEREST_DAYS} days — next on Day ${nextInterestDay()}. The balance itself doesn't grow; paying it down is what shrinks the bill.</div>`;
+            h += `<div class="c-org">Loan: <b class="${s.loan > 20000 ? 'bad' : 'mid'}">$${Math.round(s.loan).toLocaleString()}</b> owed. Interest of <b>$${interestDue().toLocaleString()}</b> is taken in cash every ${LOAN_INTEREST_DAYS} days. Next on Day ${nextInterestDay()}. The balance itself doesn't grow; paying it down is what shrinks the bill.</div>`;
         } else {
             h += `<div class="c-org">No outstanding loan.</div>`;
         }
@@ -330,7 +494,7 @@ export const BUILDERS = {
                 <span>💡 Lighting<b>$${bill.lighting}/day</b></span>
                 <span>Owned tiles<b>${ownedTileCount()}</b></span>
               </div>
-              <div class="c-org">Total bill: $${bill.total}/day — charged at midnight. Bigger labs and more machines cost more to run.</div>`;
+              <div class="c-org">Total bill: $${bill.total}/day. Charged at midnight. Bigger labs and more machines cost more to run.</div>`;
 
         h += `<div class="dd-sub">Records</div><div class="stats">
             <span>Contracts done<b>${st.done}</b></span>
@@ -344,33 +508,35 @@ export const BUILDERS = {
     },
 
     help() {
-        let h = `<div class="dd-head">How To Play</div>`;
-        h += `<div class="dd-sub">The Loop</div>
-            <div class="c-org">Accept a job in <b>Contracts</b>, build whatever machines its protocol chain needs, hire scientists in <b>Staff</b>, and they carry each sample through every step on their own.</div>`;
-        h += `<div class="dd-sub">Protocols</div>
-            <div class="c-org">Every contract runs a chain like Prep › Spin › Analyze. Each link needs a specific machine — the chain shown on a contract turns green for steps you already own, red for ones you don't. Samples don't all show up the day you accept — a big order ships in a few batches over the deadline, shown on the contract card.</div>`;
-        h += `<div class="dd-sub">Batching</div>
-            <div class="c-org">A scientist drops a sample off at a machine and is immediately free again — the sample waits there instead of tying anyone up. Centrifuges, benches and hoods hold several samples per run (see the batch size in <b>Build</b>). Once enough matching samples pile up — or after a while even with just one waiting — a free scientist walks over and starts the run. Automated equipment then finishes on its own. Hands-on kit doesn't: a Lab Bench, Microscope, Analysis Desk, Flow Hood or Fume Hood keeps whoever started the run there until it's done, so those tie up a scientist as well as a machine. Big contracts move through equipment far faster if you let samples stack up rather than chasing each one solo. A <b>Prep Robot</b> skips the "walk over and start it" step entirely for prep runs, and doesn't need anyone to stay — pricier, but fully automated. A <b>Sample Cart</b> upgrade lets one trip carry several matching samples at once instead of one at a time.</div>`;
-        h += `<div class="dd-sub">Equipment Wear</div>
-            <div class="c-org">Every run wears a machine down a little, and a worn one runs slower and risks breaking outright. A broken machine sits dead until it's fixed, and nobody on your payroll does that — maintenance is a trade you call in from <b>Lab</b>. Book one and they let themselves in the next morning and work down the list on the floor in front of you, machine by machine, billing each as they finish; whatever they're currently stood at can't be used until they move on. There's a flat call-out fee on top of the per-machine charge, so letting a couple of jobs pile up is cheaper than ringing them every time something wears — as long as you can spare the machines in the meantime.</div>`;
-        h += `<div class="dd-sub">Fire, Breaches & Claims</div>
-            <div class="c-org">Neglect has worse outcomes than a breakdown. A machine that finishes a run in poor condition can <b>catch fire</b> — it spreads to anything within a couple of tiles, destroys what it burns, and kills anyone who stays near it. A red banner appears at the top of the screen with two things you can do: <b>evacuate</b> the building, and <b>call the fire brigade</b>. A wall-mounted <b>Fire Alarm</b> does both for you the moment something ignites — but only if it works, and an alarm rots on the wall whether or not you use it, so it needs servicing like anything else. Its current reliability is shown under <b>Lab</b>.</div>
-            <div class="c-org">Neglected equipment standing in a <b>Containment Lab</b> can also breach. The room seals itself — nothing in it can be used and nobody can go in — and whoever was inside may come down with something and be off sick for days. It stays sealed until you book a <b>disinfection crew</b> from the banner; they come the next morning.</div>
-            <div class="c-org">If a scientist dies, their family sue. You can <b>settle</b> for less than the claim, or <b>fight it</b> — cheaper if you win, considerably worse if you don't. Ignore it until the deadline and it's heard without you, which is the worst of both.</div>`;
-        h += `<div class="dd-sub">Rooms & Doors</div>
-            <div class="c-org">Dark Rooms, Cleanrooms and Containment Labs are <i>floor</i>, not machines: you lay them one tile at a time in whatever shape you want, over machines you already own if you like, and tiles laid flush merge into one room. Nothing <i>needs</i> a room to work — every machine does its own job on the open floor. What a room adds is extra capability for what's inside it: a Microscope in a <b>Dark Room</b> also does fluorescence, a Chromatograph in a <b>Cleanroom</b> also does pharma-grade Chroma, and a Flow Hood, Incubator and Microscope in a <b>Containment Lab</b> handle contained work end to end. Any run inside any room also comes out slightly higher quality.</div>
-            <div class="c-org">A room is walled all the way round and <b>you decide where the way in goes</b>: place a <b>Door</b> (or an <b>Airlock</b>) on one of the room's own tiles, facing outward — rotate before placing. Lay a room with no door and it's sealed: nobody can get in and nothing inside will ever be used. A Dark Room takes a plain Door; a Cleanroom or Containment Lab has to have an Airlock, because a single door won't hold the air — and that's where staff gown up, which you'll see them do as they pass through. Sell a room or a door by clicking it with <b>Demolish</b>.</div>`;
-        h += `<div class="dd-sub">Stock & Reagents</div>
-            <div class="c-org">Some prep steps consume a stock solution (Saline, Solvent, Buffer). Buy the raw ingredient in <b>Stock</b>, build a Sink for distilled water, and auto-prep turns both into reagent automatically.</div>`;
-        h += `<div class="dd-sub">Cold Storage</div>
-            <div class="c-org">Queued samples decay before they're ever picked up. A Fridge or Freezer lets a free scientist shelve a fading one to buy time — toggle it in <b>Staff</b>. Letting one spoil instead costs reputation and money immediately, <i>and</i> cuts that contract's final payout. Scientists also chill surplus samples that would otherwise pile up at a machine whose next run is already full — handy on a big contract where samples arrive faster than one batch can absorb them.</div>`;
-        h += `<div class="dd-sub">Cleanliness</div>
-            <div class="c-org">Machines leave grime behind as they're used. A filthy lab slows work and risks contamination — tick Clean for a scientist in <b>Staff</b> (uncheck Process if you want them mopping only), or leave both checked and they'll mop whenever nothing more urgent needs doing.</div>`;
-        h += `<div class="dd-sub">Finance</div>
-            <div class="c-org">The lab opens on a startup loan, not free cash — see <b>Lab</b> for the balance. Interest compounds daily on whatever's still owed, so it's worth paying down; you can also borrow more there if you need the runway, at the same rate.</div>`;
-        h += `<div class="dd-sub">Building</div>
-            <div class="c-org">Pick a machine in <b>Build</b>, tap a tile to place it — the <b>Rotate</b> button (or R) spins it while placing or afterward. <b>Demolish</b> (or X) sells one back for half price. Buy more land under Build → Expand Lab.</div>
-            <div class="c-org">Most machines run one batch at a time — build more to parallelize. Incubators and fridges are the exception: several staff can load those at once regardless.</div>`;
+        // Deliberately a reference card, not a manual. Teaching the loop is the interactive
+        // tutorial's job now (ui/tutorial.js). What's left here is the stuff you come back to
+        // look up, in one screen, plus a way to run the tutorial again.
+        let h = `<div class="dd-head">Help</div>`;
+        h += `<button class="wide" data-replay>▶ Replay the tutorial</button>`;
+
+        const rows = [
+            ['Chains', `Every contract is a sequence of steps and each needs its own machine. The contract card lists exactly what you're missing.`],
+            ['Batching', `A sample dropped at a machine waits there for company. Runs go faster per sample when the batch is full. Let work pile up instead of chasing each tube.`],
+            ['Attended kit', `A Bench, Microscope, Analysis Desk or hood ties a scientist up for the whole run. Automated kit doesn't.`],
+            ['Rooms', `Dark Room, Cleanroom and Containment Lab are floor you lay a tile at a time, over machines you already own. They upgrade whatever stands inside. Each needs a Door. An Airlock for the sealed ones, or it's inert.`],
+            ['Stock', `Orders arrive next morning as crates at the door and must be carried to the stockroom. <b>A run will not start without the consumables it needs.</b> Extend the stockroom under Upgrades.`],
+            ['Reagents', `Saline, Solvent and Buffer are brewed only when you order a batch in Stock, and they perish after a few days.`],
+            ['Wear', `Machines wear down, run slow, then break. Nobody on the payroll fixes them. Book a mechanic in Lab and they come the next morning.`],
+            ['Accidents', `Neglected kit catches fire and spreads; a Fire Alarm evacuates and calls the brigade for you, if it's been serviced. Neglected kit in Containment breaches instead, sealing the room until a disinfection crew has been in.`],
+            ['Money', `You open on a loan. Interest is billed every ${LOAN_INTEREST_DAYS} days and utilities daily, whether you've earned anything or not.`]
+        ];
+        h += `<div class="col">`;
+        for (const [k, v] of rows) h += `<div class="reg"><span><b>${k}</b><br><span class="dim">${v}</span></span></div>`;
+        h += `</div>`;
+
+        h += `<div class="dd-sub">Controls</div><div class="col">`;
+        for (const [k, v] of [
+            ['Drag / WASD', 'move the view'], ['Q / E', 'turn the view'], ['Scroll / pinch', 'zoom'],
+            ['B', 'Build'], ['C', 'Contracts'], ['R', 'rotate what you\'re placing'],
+            ['M', 'move something built'], ['X', 'sell something'], ['P', 'pause'], ['Esc', 'cancel']
+        ]) h += `<div class="reg"><span>${k}</span><span class="dim">${v}</span></div>`;
+        h += `</div>`;
+        h += `<div class="c-org">Laying room floor keeps the tool in your hand. Keep clicking tiles, Esc when the shape is right. The game saves itself every in-game day.</div>`;
         return h;
     }
 };
@@ -384,24 +550,44 @@ export function wireMenu(menu, dd) {
     } else if (menu === 'contracts') {
         dd.querySelectorAll('[data-accept]').forEach(el =>
             el.addEventListener('click', () => acceptContract(+el.dataset.accept)));
+        dd.querySelectorAll('[data-cancel]').forEach(el =>
+            el.addEventListener('click', () => {
+                const c = G.state.contracts.find(x => x.id === +el.dataset.cancel);
+                if (!c) return;
+                const { fee, rep } = cancelCost(c);
+                if (confirm(`Cancel "${c.name}"?\n\nBreak fee: $${fee.toLocaleString()}\nReputation: -${rep}\n\nStill far cheaper than failing it at the deadline.`))
+                    cancelContract(c.id);
+            }));
     } else if (menu === 'staff') {
         const hb = dd.querySelector('[data-hire]');
         if (hb) hb.addEventListener('click', () => hireStaff());
         const cs = dd.querySelector('[data-coldstore]');
         if (cs) cs.addEventListener('click', () => toggleColdStore());
+        dd.querySelectorAll('[data-fire]').forEach(el =>
+            el.addEventListener('click', () => {
+                const w = G.state.staff.find(x => x.id === +el.dataset.fire);
+                if (w && confirm(`Fire ${w.name}?\n\nAnything they're carrying goes back in the queue, and hiring a replacement costs full price.`))
+                    fireStaff(w.id);
+            }));
         dd.querySelectorAll('[data-cap]').forEach(el =>
             el.addEventListener('click', () => {
                 const [id, cap] = el.dataset.cap.split(':');
                 toggleStaffCap(+id, cap);
             }));
     } else if (menu === 'stock') {
-        const ap = dd.querySelector('[data-autoprep]');
-        if (ap) ap.addEventListener('click', () => toggleAutoPrep());
         dd.querySelectorAll('[data-order]').forEach(el =>
-            el.addEventListener('click', () => orderStock(el.dataset.order, 10)));
+            el.addEventListener('click', () => orderStock(el.dataset.order, +el.dataset.qty || 10)));
+        dd.querySelectorAll('[data-brew]').forEach(el =>
+            el.addEventListener('click', () => {
+                const [type, d] = el.dataset.brew.split(':');
+                orderBrew(type, +d);
+            }));
     } else if (menu === 'upgrades') {
         dd.querySelectorAll('[data-up]').forEach(el =>
             el.addEventListener('click', () => buyUpgrade(el.dataset.up)));
+    } else if (menu === 'help') {
+        const rp = dd.querySelector('[data-replay]');
+        if (rp) rp.addEventListener('click', () => restartTutorial());
     } else if (menu === 'lab') {
         const mech = dd.querySelector('[data-mech]');
         if (mech) mech.addEventListener('click', () => callMechanic());
@@ -422,6 +608,7 @@ function labelState(st) {
         toSink: 'to sink', filling: 'drawing water',
         toColdPickup: 'fetching sample', toFridge: 'to fridge', storing: 'shelving sample',
         toOperate: 'to machine', operating: 'starting a run', tending: 'working the bench',
+        toCrate: 'to the delivery', toStock: 'carrying a crate', stocking: 'putting stock away',
         evacuating: 'evacuating!', evacuatingDone: 'outside', sick: 'going home sick', sickDone: 'off sick'
     })[st] || st;
 }

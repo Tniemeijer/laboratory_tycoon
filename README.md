@@ -1,14 +1,12 @@
 # Lab Tycoon
 
-You have a room, a loan, and no idea what you're doing. Congratulations — you run
-a laboratory now.
+You have a room, a loan, and no idea what you're doing. Congratulations you run
+a laboratory now!
 
 Lab Tycoon is a browser management game about keeping a diagnostics lab alive.
 Samples arrive at the front door with a deadline and a shelf life. Your
 scientists carry them from machine to machine, one step at a time, while you try
-to buy the right equipment before the wrong contract arrives. It's rendered as a
-chunky isometric pixel-art lab, which is where the visual style is borrowed from
-— the game underneath is its own thing.
+to buy the right equipment and restock before the contract arrives.
 
 It runs entirely in the browser. Nothing to install, nothing to sign up for, and
 it saves to your own machine.
@@ -67,6 +65,23 @@ don't — is most of the mid-game.
 **Your scientists get better.** Whoever starts a run gets the credit, and their
 skill at that specific task grows: faster runs, better quality. Nobody trains at
 a machine you never let them touch.
+
+**Deliveries turn up at the door, not on a shelf.** Order consumables and raw
+ingredients from Stock and they arrive next morning as crates stacked in the
+entrance — somebody has to carry each one through to the **stockroom** before any
+of it can be used. The stockroom is an annex beside the entrance that you extend
+with the Stockroom upgrade, the same way the break room grows with Staff
+Quarters; how far it's racked out is your shelf space.
+
+**And if you run out, work stops.** A run won't start without the disposables,
+slides, flow cells or stock solution it needs — the batch just sits there and the
+machine idles until you restock. Nothing gets improvised at reduced quality, so
+an empty stockroom is a stoppage, not a discount.
+
+**Reagents are brewed to order.** Saline, Solvent and Buffer don't restock
+themselves. You ask for a batch, a free scientist takes the ingredient and some
+distilled water to a bench and makes it — and it perishes a few days later. Brew
+early and you bin it; brew late and the line waits.
 
 **Money is a leash.** You open on a loan, not a grant. Interest is billed in cash
 every five days whether you've earned anything or not. There's a utility bill

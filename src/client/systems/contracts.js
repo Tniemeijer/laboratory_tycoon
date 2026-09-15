@@ -1,6 +1,6 @@
 // ==================== CONTRACTS ====================
 
-import { PROTOCOLS, MAX_ACTIVE, OFFER_COUNT, ORGS, ADJ, SPOIL_PAYOUT_CUT } from '../data.js';
+import { PROTOCOLS, MAX_ACTIVE, OFFER_COUNT, ORGS, ADJ, SPOIL_PAYOUT_CUT, CANCEL_PENALTY_FACTOR, CANCEL_FEE_FACTOR } from '../data.js';
 import { G, nid, labLevel, repMult, dirtyUI } from '../core.js';
 
 function makeOffer() {
@@ -26,7 +26,7 @@ function makeOffer() {
 }
 export function refillOffers() { while (G.state.offers.length < OFFER_COUNT) G.state.offers.push(makeOffer()); }
 
-// Samples don't all show up on day one — they trickle in as a few shipments spread across the
+// Samples don't all show up on day one. They trickle in as a few shipments spread across the
 // first ~60% of the contract's deadline (leaving the back end free to actually process the last
 // one before it's due). That's what makes storage a real decision: you can't just grab every
 // sample you'll ever need for the job in one trip, so holding a partial batch in staging or the
@@ -90,9 +90,37 @@ export function completeContract(c) {
     G.onToast(`Contract complete! +$${cash}  +${rep} rep  (${Math.round(qAvg * 100)}% quality${spoilNote})`);
     dirtyUI();
 }
+// Handing a job back before the deadline. It still costs reputation — you took it on and you're
+// walking away, but materially less than being found out at the deadline, because the client
+// gets the chance to place it elsewhere. That gap is the whole point: a contract you can't serve
+// is worth cancelling early rather than sitting on and hoping.
+// What backing out of this job costs, in cash and in reputation. Exported so the button and the
+// confirmation can quote the real number rather than a vague warning.
+export function cancelCost(c) {
+    return {
+        fee: Math.max(50, Math.round(c.reward * CANCEL_FEE_FACTOR)),
+        rep: Math.max(3, Math.round(failPenalty(c) * CANCEL_PENALTY_FACTOR))
+    };
+}
+export function cancelContract(id, abandonSample) {
+    const s = G.state;
+    const c = s.contracts.find(x => x.id === id);
+    if (!c) return;
+    const { fee, rep } = cancelCost(c);
+    s.money -= fee;
+    s.reputation = Math.max(0, s.reputation - rep);
+    s.stats.cancelled = (s.stats.cancelled || 0) + 1;
+    for (const sm of s.samples.slice()) if (sm.contractId === c.id) abandonSample(sm.id);
+    s.contracts = s.contracts.filter(x => x !== c);
+    G.onToast(`Cancelled: ${c.name}. Break fee $${fee.toLocaleString()}, -${rep} rep.`, true);
+    dirtyUI();
+}
+function failPenalty(c) {
+    return Math.round(12 + c.required * 4 + PROTOCOLS[c.proto].steps.length * 2);
+}
 export function failContract(c, abandonSample) {
     const s = G.state;
-    const pen = Math.round(12 + c.required * 4 + PROTOCOLS[c.proto].steps.length * 2);
+    const pen = failPenalty(c);
     s.reputation = Math.max(0, s.reputation - pen);
     s.stats.failed++;
     c.state = 'failed';

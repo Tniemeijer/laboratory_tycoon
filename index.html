@@ -52,6 +52,13 @@
              evacuate from, a sealed containment room, a claim to answer). See renderAlerts(). -->
         <div id="alerts" hidden></div>
 
+        <!-- Guided first run. Driven by ui/tutorial.js, which watches real game state to decide
+             when each step is done. Hidden entirely once finished or skipped. -->
+        <div id="tutorial" hidden></div>
+
+        <!-- Aggregated "what's blocking my active contracts" list. See ui/tasks.js. -->
+        <div id="tasks" hidden></div>
+
         <div id="hint">Drag or WASD to move the view · Q/E (or ⟲⟳) to turn · scroll/pinch to zoom</div>
         <button id="rotate-pill" hidden>⟳ Rotate</button>
         <div id="cam-rotate">

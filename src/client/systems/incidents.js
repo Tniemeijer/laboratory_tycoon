@@ -39,7 +39,7 @@ function centerOf(e) {
     for (const [tx, tz] of t) { const w = tileToWorld(tx, tz); x += w.x; z += w.z; }
     return { x: x / t.length, z: z / t.length };
 }
-// Chebyshev distance between two footprints, in tiles — "within 2 tiles" means any tile of one is
+// Chebyshev distance between two footprints, in tiles, "within 2 tiles" means any tile of one is
 // within 2 of any tile of the other, not centre-to-centre, so a big machine genuinely is a bigger
 // target.
 function tileGap(a, b) {
@@ -64,7 +64,7 @@ export function fireAlarms() {
     return G.state.equipment.filter(e => BUILD[e.type] && BUILD[e.type].mount);
 }
 // A neglected alarm is close to useless; a freshly-serviced one nearly always goes off. Only the
-// best alarm in the building is rolled — a second one doesn't make the first more reliable, it
+// best alarm in the building is rolled. A second one doesn't make the first more reliable, it
 // just means there's a better one somewhere.
 export function alarmReliability() {
     const best = fireAlarms().reduce((m, e) => Math.max(m, (e.condition ?? 100)), -1);
@@ -81,7 +81,7 @@ export function startFire(e, silent) {
     for (const w of s.staff) if (w.job && (w.job.stationId === e.id || w.job.operateId === e.id)) G.releaseWorkerJob(w);
     if (!silent) {
         s.stats.fires = (s.stats.fires || 0) + 1;
-        G.onToast(`FIRE — ${BUILD[e.type].name} is alight!`, true);
+        G.onToast(`FIRE, ${BUILD[e.type].name} is alight!`, true);
         // The alarm's whole job: doing this for you while you're looking at another screen.
         if (!s.evacuating && Math.random() < alarmReliability()) {
             G.onToast('Fire alarm — evacuating and calling the brigade', true);
@@ -92,7 +92,7 @@ export function startFire(e, silent) {
     dirtyUI();
     return true;
 }
-// Rolled once per completed run, alongside the breakdown check — see equipment.js applyWear().
+// Rolled once per completed run, alongside the breakdown check. See equipment.js applyWear().
 export function fireRoll(st) {
     const cond = st.condition ?? 100;
     if (cond >= FIRE_COND_THRESHOLD || isBurning(st)) return;
@@ -104,7 +104,7 @@ export function evacuate() {
     const s = G.state;
     if (s.evacuating) return;
     s.evacuating = true;
-    // Contractors leave too — nobody is servicing a centrifuge while the building burns. Whatever
+    // Contractors leave too. Nobody is servicing a centrifuge while the building burns. Whatever
     // they hadn't got to is still broken and still on the mechanic's list, so it costs the
     // call-out fee to have them back, not the work itself.
     clearVisitors((s.visitors || []).length ? 'The mechanic downed tools and left' : null);
@@ -128,7 +128,7 @@ export function callFireBrigade(silent) {
     if (s.brigadeEta != null) return;
     if (!(s.fires || []).length) { if (!silent) G.onToast('Nothing is on fire', true); return; }
     s.brigadeEta = FIRE_BRIGADE_ETA;
-    if (!silent) G.onToast(`Fire brigade on the way — $${FIRE_BRIGADE_FEE.toLocaleString()} call-out`);
+    if (!silent) G.onToast(`Fire brigade on the way, $${FIRE_BRIGADE_FEE.toLocaleString()} call-out`);
     dirtyUI();
 }
 function burnOut(f) {
@@ -140,7 +140,7 @@ function burnOut(f) {
     s.equipment = s.equipment.filter(x => x !== e);
     for (const w of s.staff) if (w.reservedStation === e.id) G.releaseWorkerJob(w);
     bumpNav();
-    G.onToast(`${BUILD[e.type].name} burned out — total loss`, true);
+    G.onToast(`${BUILD[e.type].name} burned out. Total loss`, true);
     s.reputation = Math.max(0, s.reputation - FIRE_REP_PENALTY);
 }
 
@@ -182,12 +182,12 @@ export function fightLawsuit(id, byDefault) {
     const won = !byDefault && Math.random() < LAWSUIT_WIN_CHANCE;
     if (won) {
         s.money -= fee;
-        G.onToast(`Court found for the lab over ${l.name} — $${fee.toLocaleString()} in fees`);
+        G.onToast(`Court found for the lab over ${l.name}, $${fee.toLocaleString()} in fees`);
     } else {
         const cost = Math.round(l.claim * LAWSUIT_LOSS_MULT) + fee;
         s.money -= cost;
         s.reputation = Math.max(0, s.reputation - DEATH_REP_PENALTY / 2);
-        G.onToast(`Lost the ${l.name} case — $${cost.toLocaleString()} in damages`, true);
+        G.onToast(`Lost the ${l.name} case, $${cost.toLocaleString()} in damages`, true);
     }
     dirtyUI();
 }
@@ -234,7 +234,7 @@ export function startOutbreak(e) {
     s.outbreak = { tiles: group, day: s.day, crewDay: null, source: BUILD[e.type].name };
     s.stats.outbreaks = (s.stats.outbreaks || 0) + 1;
     s.reputation = Math.max(0, s.reputation - OUTBREAK_REP_PENALTY);
-    G.onToast(`CONTAINMENT BREACH — the ${BUILD[e.type].name} let something out. Room sealed.`, true);
+    G.onToast(`CONTAINMENT BREACH. The ${BUILD[e.type].name} let something out. Room sealed.`, true);
 
     // Anyone standing in there when it went has been exposed. Anyone else is simply shut out.
     // The room seals *behind* them, not around them: the tiles come out of the nav grid the
@@ -248,7 +248,7 @@ export function startOutbreak(e) {
         if (!inside.has(`${t.tx},${t.tz}`)) continue;
         if (Math.random() < OUTBREAK_INFECT_CHANCE) {
             w.illUntil = s.day + ILLNESS_DAYS;
-            G.onToast(`${w.name} has been exposed — off sick until Day ${w.illUntil}`, true);
+            G.onToast(`${w.name} has been exposed. Off sick until Day ${w.illUntil}`, true);
         }
         G.releaseWorkerJob(w);
         if (exit) { const wp = tileToWorld(exit[0], exit[1]); w.wx = wp.x; w.wz = wp.z; }
@@ -275,7 +275,7 @@ export function callDisinfection() {
     if (!s.outbreak) return G.onToast('Nothing to disinfect', true);
     if (s.outbreak.crewDay != null) return G.onToast(`Crew already booked for Day ${s.outbreak.crewDay}`, true);
     s.outbreak.crewDay = s.day + 1;
-    G.onToast(`Disinfection crew booked for Day ${s.outbreak.crewDay} — $${DISINFECT_FEE.toLocaleString()}`);
+    G.onToast(`Disinfection crew booked for Day ${s.outbreak.crewDay}, $${DISINFECT_FEE.toLocaleString()}`);
     dirtyUI();
 }
 // Day rollover: the crew turns up that morning. They then have to walk in and actually fog the
@@ -326,7 +326,7 @@ export function updateIncidents(dt) {
         if (s.brigadeEta <= 0) { s.brigadeEta = 0; spawnFireCrew(); dirtyUI(); }
     }
     if (!s.fires.length) {
-        // Once the last fire is out — burned out on its own, say, with no engine ever called —
+        // Once the last fire is out. Burned out on its own, say, with no engine ever called —
         // there's nothing left to run from. A crew still on the premises ends it themselves on
         // the way out, so don't pre-empt them.
         const crewHere = (s.visitors || []).some(v => v.kind === 'firefighter');
@@ -352,7 +352,7 @@ export function updateIncidents(dt) {
     }
 
     // Anyone who stays in the flames. The timer drains when they get clear, so running past a
-    // fire on the way out is survivable — standing next to one isn't.
+    // fire on the way out is survivable. Standing next to one isn't.
     for (const w of s.staff.slice()) {
         let near = false;
         for (const f of s.fires) {

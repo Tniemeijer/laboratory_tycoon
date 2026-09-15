@@ -234,6 +234,28 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
 .reg .up { color: var(--red); }        /* a price going up is bad news for you */
 .reg .down { color: var(--green); }
 
+/* Destructive actions — hand a contract back, let someone go. Red border rather than a red fill:
+   they sit inside busy cards and a solid block of red would shout over everything else. */
+button.mini.danger { border-color: var(--red); color: var(--red); }
+button.mini.danger:hover:not(:disabled) { background: #f0cfc7; }
+
+/* The "what's still missing" checklist on a contract card. */
+.tasks { margin-top: 5px; border-top: 2px solid var(--edge-lite); padding-top: 4px; }
+.tasks .t-head { font-size: 10px; color: var(--red); margin-bottom: 2px; }
+.tasks .t-item { font-size: 10px; color: #6b4a2a; line-height: 1.35; }
+.tasks .t-item b { color: var(--ink); }
+.tasks.ready { font-size: 10px; color: var(--green); border-top-color: var(--edge-lite); }
+.tasks .t-head.wait { color: var(--gold); margin-top: 3px; }
+.tasks .t-item.wait { color: #8a6a3f; }
+
+.brew { display: flex; align-items: center; gap: 4px; }
+.brew .adj { width: 22px; margin-top: 0; padding: 3px 0; }
+.brew-n {
+    min-width: 20px; text-align: center; font-size: 12px;
+    background: var(--panel); border: 2px solid var(--edge); padding: 2px 4px;
+}
+.brew-n.on { background: #f0a03c; }
+
 .loan-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 .loan-row .adj { width: auto; flex: none; margin: 0; padding: 4px 12px; font-size: 14px; line-height: 1; }
 .loan-amt { flex: 1; text-align: center; font-size: 13px; }
@@ -272,6 +294,91 @@ button.mini:disabled, button.wide:disabled { opacity: 0.5; cursor: not-allowed; 
 .alert b { color: var(--red); }
 .alert .row { display: flex; gap: 6px; margin-top: 6px; }
 .alert .row button { flex: 1; margin-top: 0; }
+
+/* ---------- to-do panel ---------- */
+/* Bottom-left, above the hint line. Collapsed it's a single strip with a count, which is the
+   at-a-glance answer; expanded it's the full list. The tutorial lives bottom-right, so on a phone
+   the two would fight for the same row — the panel defaults to collapsed there (see tasks.js) and
+   is hidden outright while the tutorial is running. */
+#tasks {
+    position: absolute; left: 10px; bottom: 58px;
+    width: min(330px, calc(100vw - 20px));
+    background: var(--panel); border: 3px solid var(--edge);
+    box-shadow: inset 0 0 0 2px var(--edge-lite);
+    z-index: 40;
+}
+.todo-head {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    background: none; border: 0; border-bottom: 2px solid var(--edge-lite);
+    font-family: inherit; font-weight: 700; font-size: 11px; color: var(--ink);
+    padding: 6px 8px; cursor: pointer; text-align: left;
+}
+.todo-head:hover { background: var(--panel-2); }
+.todo-head.done { cursor: default; border-bottom: 0; color: var(--green); }
+.todo-head.done:hover { background: none; }
+.todo-n {
+    background: var(--red); color: #fff2d8; border: 2px solid var(--edge);
+    min-width: 18px; text-align: center; font-size: 10px; padding: 0 3px;
+}
+.todo-n.ok { background: var(--green); }
+.todo-n.wait { background: var(--gold); }
+.todo-item.wait { color: #8a6a3f; }
+.todo-caret { margin-left: auto; font-size: 10px; color: #8a6a3f; }
+.todo-list { max-height: 34vh; overflow-y: auto; padding: 5px 8px 7px; }
+.todo-item { font-size: 10px; line-height: 1.4; color: #6b4a2a; margin-bottom: 3px; }
+.todo-item b { color: var(--ink); }
+.todo-for { color: #a98d63; }
+
+@media (max-width: 560px) {
+    #tasks { bottom: 64px; width: min(260px, calc(100vw - 20px)); }
+    .todo-list { max-height: 26vh; }
+    body.tut-on #tasks { display: none; }
+}
+
+/* ---------- interactive tutorial ---------- */
+/* Bottom-right, above the camera buttons. The dropdown menus are anchored under their own bar
+   buttons, which are all on the left, so the right-hand side is the one place a persistent panel
+   can sit without covering the very menu the current step is telling you to open. */
+#tutorial {
+    position: absolute; right: 10px; bottom: 58px;
+    width: min(320px, calc(100vw - 20px));
+    background: var(--panel); border: 3px solid var(--edge);
+    box-shadow: inset 0 0 0 2px var(--edge-lite);
+    padding: 8px 10px; z-index: 45;
+}
+.tut-top { display: flex; align-items: center; gap: 6px; }
+.tut-step {
+    background: #f0a03c; border: 2px solid var(--edge);
+    font-size: 10px; padding: 1px 4px;
+}
+.tut-title { font-size: 12px; flex: 1; }
+.tut-x {
+    background: var(--btn); border: 2px solid var(--edge); color: var(--ink);
+    font-family: inherit; font-weight: 700; font-size: 13px;
+    width: 20px; height: 20px; line-height: 14px; padding: 0; cursor: pointer;
+}
+.tut-body { font-size: 11px; line-height: 1.45; color: #6b4a2a; margin-top: 5px; }
+.tut-body b { color: var(--ink); }
+.tut-row { display: flex; gap: 6px; margin-top: 7px; }
+.tut-row .mini { margin-top: 0; }
+
+/* The ring around whatever the current step is pointing at. Drawn with outline rather than border
+   so it can't shift the bar's layout while it pulses. */
+.tut-target {
+    outline: 3px solid #f0a03c; outline-offset: 2px;
+    animation: tutpulse 1.1s ease-in-out infinite;
+}
+@keyframes tutpulse { 0%, 100% { outline-color: #f0a03c; } 50% { outline-color: #fff2d8; } }
+
+@media (max-width: 560px) {
+    /* Phones: the hint line and rotate pill live down there too, so sit a little higher. */
+    #tutorial { bottom: 64px; padding: 7px 8px; }
+    /* An open menu fills a phone screen, so the two can't share it. The panel has already said
+       which menu to open by this point, and comes back the moment the menu is closed (or the
+       step completes). */
+    body.menu-open #tutorial { display: none; }
+    .tut-body { font-size: 10px; }
+}
 
 /* ---------- hint + toast ---------- */
 #hint {

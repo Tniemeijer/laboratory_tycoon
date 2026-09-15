@@ -15,47 +15,101 @@ export const GATE_COLS = [7, 8];
 // out of the middle of the work floor, and grows as Staff Quarters is upgraded: it starts as a
 // two-tile nook with nothing but a coffee machine and gains a row, then furniture, with each level.
 // It's an annex bolted onto the *outside* of the building, west of the entrance, on ground
-// nothing else can ever use — not a bite out of the work floor. Growing pushes its far wall
+// nothing else can ever use, not a bite out of the work floor. Growing pushes its far wall
 // further out into that dead ground, so an upgrade never overwrites anything you've built.
-const BREAK_ROOM_TIERS = [
-    { x0: 2, z0: 12, w: 2, h: 2 },   // no upgrade — a coffee machine and standing room
-    { x0: 1, z0: 12, w: 3, h: 2 },
-    { x0: 0, z0: 12, w: 4, h: 2 },
-    { x0: 0, z0: 12, w: 4, h: 3 }
-];
-// The largest it can ever get — the renderer lays floor for this whole patch up front and only
+// ---------- annexes ----------
+// Two rooms in the lab aren't built by the player and can't be built over: the break room and the
+// stockroom. Both work the same way and share every bit of machinery below — a tiered rectangle
+// bolted onto the *outside* of the building, on dead ground beside the entrance that no plot will
+// ever use, walled off with one automatic doorway onto the work floor, growing outward with an
+// upgrade so levelling up never overwrites anything you've built.
+//
+//   break  — Staff Quarters. Starts as a nook with a coffee machine, gains floor and furniture.
+//   stock  — Stockroom. Starts as a small rack by the door, gains racking and shelf space.
+//
+// They sit either side of the entrance corridor: break room west, stockroom east.
+const ANNEXES = {
+    break: {
+        upgrade: 'staff',
+        max: { x0: 0, z0: 12, w: 4, h: 3 },
+        tiers: [
+            { x0: 2, z0: 12, w: 2, h: 2 },   // no upgrade. A coffee machine and standing room
+            { x0: 1, z0: 12, w: 3, h: 2 },
+            { x0: 0, z0: 12, w: 4, h: 2 },
+            { x0: 0, z0: 12, w: 4, h: 3 }
+        ],
+        // Fixed tiles, each with the level it turns up at, so nothing ever shuffles once it's
+        // installed — the room grows away around them. All clear of the column nearest the
+        // corridor, which is where the doorway onto the lab floor is. The appliances line the back
+        // wall in unlock order, each facing into the room (`rot` 0 faces south), leaving the middle
+        // row as a walkway from the door and the south row free for the table.
+        props: [
+            { key: 'coffee',  level: 0, tile: [2, 12], rot: 0 },
+            { key: 'cooler',  level: 1, tile: [1, 12], rot: 0 },
+            { key: 'vending', level: 2, tile: [0, 12], rot: 0 },
+            { key: 'table',   level: 3, tile: [1, 14], rot: 0 }
+        ]
+    },
+    stock: {
+        upgrade: 'storage',
+        max: { x0: 12, z0: 12, w: 4, h: 3 },
+        tiers: [
+            { x0: 12, z0: 12, w: 2, h: 2 },   // no upgrade — one rack by the door
+            { x0: 12, z0: 12, w: 3, h: 2 },
+            { x0: 12, z0: 12, w: 4, h: 2 },
+            { x0: 12, z0: 12, w: 4, h: 3 },
+            { x0: 12, z0: 12, w: 4, h: 3 }    // top level racks the same floor out further
+        ],
+        // Racking along the back (north) wall, then the far end. The x=12 column is left entirely
+        // clear on purpose: it's the only side of this annex that borders the work floor, so it's
+        // where the doorway has to go, and a rack standing on it would wall the room off from the
+        // lab completely. Same reasoning as the break room keeping its own door column free.
+        props: [
+            { key: 'rack', level: 0, tile: [13, 12], rot: 0 },
+            { key: 'rack', level: 1, tile: [14, 12], rot: 0 },
+            { key: 'rack', level: 2, tile: [15, 12], rot: 0 },
+            { key: 'rack', level: 3, tile: [15, 14], rot: 0 },
+            { key: 'rack', level: 4, tile: [14, 14], rot: 0 }
+        ]
+    }
+};
+export const ANNEX_KINDS = Object.keys(ANNEXES);
+// The largest each can ever get — the renderer lays floor for the whole patch up front and only
 // shows the part currently walled in.
-export const BREAK_ROOM_MAX = { x0: 0, z0: 12, w: 4, h: 3 };
-export function breakRoom(state) {
-    const lv = Math.min((state && state.upgrades ? state.upgrades.staff : 0) || 0, BREAK_ROOM_TIERS.length - 1);
-    return { ...BREAK_ROOM_TIERS[lv], level: lv };
+export function annexMax(kind) { return ANNEXES[kind].max; }
+export function annexLevel(state, kind) {
+    const a = ANNEXES[kind];
+    const lv = (state && state.upgrades ? state.upgrades[a.upgrade] : 0) || 0;
+    return Math.min(lv, a.tiers.length - 1);
 }
-// Fixed tiles, each with the Staff Quarters level it turns up at, so nothing ever shuffles once
-// it's installed — the room grows away westward around them. All clear of the east column, which
-// is where the doorway onto the lab floor is.
-// The appliances line up along the back (north) wall, in the order they're unlocked, each facing
-// out into the room — `rot` is quarter-turns the same way equipment uses them, and 0 faces south,
-// which is into the room for anything standing against that wall. That leaves the middle row as a
-// clear walkway from the door and the south row free for the table, instead of the whole lot
-// sitting in one line across the middle of the floor with the table wedged in a corner.
-const BREAK_ROOM_PROPS = [
-    { key: 'coffee',  level: 0, tile: [2, 12], rot: 0 },
-    { key: 'cooler',  level: 1, tile: [1, 12], rot: 0 },
-    { key: 'vending', level: 2, tile: [0, 12], rot: 0 },
-    { key: 'table',   level: 3, tile: [1, 14], rot: 0 }
-];
-export function breakRoomProps(state) {
-    const lv = breakRoom(state).level;
-    return BREAK_ROOM_PROPS.filter(p => p.level <= lv).map(p => ({ key: p.key, tile: p.tile, rot: p.rot || 0 }));
+export function annexRect(state, kind) {
+    const lv = annexLevel(state, kind);
+    return { ...ANNEXES[kind].tiers[lv], level: lv };
 }
-export function inBreakRoom(state, tx, tz) {
-    const br = breakRoom(state);
-    return tx >= br.x0 && tx < br.x0 + br.w && tz >= br.z0 && tz < br.z0 + br.h;
+export function annexProps(state, kind) {
+    const lv = annexLevel(state, kind);
+    return ANNEXES[kind].props.filter(p => p.level <= lv).map(p => ({ key: p.key, tile: p.tile, rot: p.rot || 0 }));
 }
+function inRect(r, tx, tz) { return tx >= r.x0 && tx < r.x0 + r.w && tz >= r.z0 && tz < r.z0 + r.h; }
+export function inAnnex(state, kind, tx, tz) { return inRect(annexRect(state, kind), tx, tz); }
+export function inAnyAnnex(state, tx, tz) { return ANNEX_KINDS.some(k => inAnnex(state, k, tx, tz)); }
+// Is this tile inside the *maximum* extent of any annex? Used by the building shell and the floor,
+// both of which have to account for ground the room hasn't grown into yet.
+export function inAnnexFootprint(tx, tz) { return ANNEX_KINDS.some(k => inRect(ANNEXES[k].max, tx, tz)); }
+
+// Kept as named wrappers: the break room is referenced by name all over the renderer and the
+// staff AI, and reading `breakRoom(state)` there says more than `annexRect(state, 'break')`.
+export function breakRoom(state) { return annexRect(state, 'break'); }
+export function breakRoomProps(state) { return annexProps(state, 'break'); }
+export function inBreakRoom(state, tx, tz) { return inAnnex(state, 'break', tx, tz); }
+export function stockRoom(state) { return annexRect(state, 'stock'); }
+export function inStockRoom(state, tx, tz) { return inAnnex(state, 'stock', tx, tz); }
+export const BREAK_ROOM_MAX = ANNEXES.break.max;
+
 const HANGOUT_OFFSETS = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]];
 
 // ---------- rooms, walls and doorways ----------
-// Every walled area in the lab — the break room and each kind of player-built room — is described
+// Every walled area in the lab. The break room and each kind of player-built room. Is described
 // the same way: a set of tiles, walled along every edge that doesn't face more of the same room,
 // with exactly one of those edges left open as a doorway. buildNav() turns that into per-edge
 // blocking so staff have to walk round to the door instead of straight through a wall, and
@@ -72,9 +126,11 @@ export function roomAreas(state) {
         if (!areas.has(kind)) areas.set(kind, new Set());
         areas.get(kind).add(`${x},${z}`);
     };
-    const br = breakRoom(state);
-    for (let x = br.x0; x < br.x0 + br.w; x++)
-        for (let z = br.z0; z < br.z0 + br.h; z++) add('break', x, z);
+    for (const kind of ANNEX_KINDS) {
+        const r = annexRect(state, kind);
+        for (let x = r.x0; x < r.x0 + r.w; x++)
+            for (let z = r.z0; z < r.z0 + r.h; z++) add(kind, x, z);
+    }
     for (const e of state.equipment || []) {
         const b = BUILD[e.type];
         if (!b || !b.room) continue;
@@ -103,9 +159,9 @@ export function roomGroups(tiles) {
     return groups;
 }
 // The annex sits outside every purchasable plot, so "is this walkable ground" is broader than
-// "is this plot owned" — its own floor counts too.
+// "is this plot owned". Its own floor counts too.
 export function isWalkableGround(state, tx, tz) {
-    return isTileOwned(state.ownedZones, tx, tz) || inBreakRoom(state, tx, tz);
+    return isTileOwned(state.ownedZones, tx, tz) || inAnyAnnex(state, tx, tz);
 }
 // Can a scientist actually stand on this tile to come and go through a door here?
 function doorwayUsable(state, x, z, roomTiles) {
@@ -118,7 +174,7 @@ function doorwayUsable(state, x, z, roomTiles) {
     }
     return true;
 }
-// Which way a door faces, by rotation — the same mapping the models and staff approach code use,
+// Which way a door faces, by rotation. The same mapping the models and staff approach code use,
 // where 0 is south.
 export const DOOR_FACING = [[0, 1], [-1, 0], [0, -1], [1, 0]];
 export function doorPieces(state) {
@@ -154,9 +210,14 @@ export function roomDoorways(state, tiles, kind) {
 // traffic comes from.
 export function breakRoomDoorway(state, tiles) {
     const doors = new Set();
+    // A doorway is no use in a tile you can't stand in. The annex props are nav obstacles, so a
+    // door picked on a tile with a rack (or a vending machine) on it seals the room off entirely
+    // — which is exactly what happened when the stockroom's racking reached its door column.
+    const blocked = new Set(ANNEX_KINDS.flatMap(k => annexProps(state, k).map(p => p.tile.join(','))));
     for (const group of roomGroups(tiles)) {
         let best = null, bestRank = Infinity;
         for (const key of [...group].sort()) {
+            if (blocked.has(key)) continue;
             const [x, z] = key.split(',').map(Number);
             DOOR_PREF.forEach(([dx, dz], i) => {
                 if (tiles.has(`${x + dx},${z + dz}`)) return;
@@ -173,7 +234,7 @@ export function breakRoomDoorway(state, tiles) {
 export function sealedRooms(state) {
     const out = [];
     for (const [kind, tiles] of roomAreas(state)) {
-        if (kind === 'break') continue;                                  // the annex has its own fixed doorway
+        if (ANNEX_KINDS.includes(kind)) continue;                        // annexes have their own fixed doorway
         const doors = roomDoorways(state, tiles, kind);
         for (const group of roomGroups(tiles)) {
             const hasDoor = [...doors].some(d => {
@@ -233,7 +294,7 @@ export function zoneOwnedTileCount(ownedZones) {
     return n;
 }
 
-// A "room" (Cleanroom, Dark Room — see BUILD[type].room) is floor, not furniture: it never
+// A "room" (Cleanroom, Dark Room. See BUILD[type].room) is floor, not furniture: it never
 // collides with machines in either direction. Equipment drops onto its tiles like bare ground
 // (that's the whole point — a Scale only works once it's standing inside one), and a room can
 // equally be laid down over machines already sitting there, so you can wall off the microscope
@@ -242,9 +303,9 @@ export function zoneOwnedTileCount(ownedZones) {
 function tileBlocked(equipment, tx, tz, ignoreId, placingRoom) {
     for (const e of equipment) {
         if (e.id === ignoreId) continue;
-        if (BUILD[e.type].mount) continue;                   // hangs on the wall above — see mountBlocked()
+        if (BUILD[e.type].mount) continue;                   // hangs on the wall above. See mountBlocked()
         if (!footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz)) continue;
-        if (!!BUILD[e.type].room !== placingRoom) continue;   // floor vs. furniture — different layers
+        if (!!BUILD[e.type].room !== placingRoom) continue;   // floor vs. furniture. Different layers
         return true;
     }
     return false;
@@ -256,7 +317,7 @@ function doorBlocked(equipment, tx, tz, ignoreId) {
         footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz));
 }
 // A wall fitting hangs well above head height on the wall of its tile and takes up no floor at
-// all, so unlike a door it happily shares a tile with whatever is standing there — that's the
+// all, so unlike a door it happily shares a tile with whatever is standing there, that's the
 // point of mounting it rather than parking it on the floor. The only things it can't share with
 // are another fitting and a doorway, which both want the same piece of wall.
 function mountBlocked(equipment, tx, tz, ignoreId) {
@@ -275,10 +336,9 @@ function mountBlocked(equipment, tx, tz, ignoreId) {
 // floor with nothing to hang anything on.
 export function isShellWall(tx, tz) {
     if (tx < 0 || tx >= GRID || tz < 0) return true;
-    // The break room is an annex bolted onto the side, so the shell doesn't close across where
-    // the two meet — its own partition wall, with the doorway in it, is the boundary there.
-    if (tx >= BREAK_ROOM_MAX.x0 && tx < BREAK_ROOM_MAX.x0 + BREAK_ROOM_MAX.w &&
-        tz >= BREAK_ROOM_MAX.z0 && tz < BREAK_ROOM_MAX.z0 + BREAK_ROOM_MAX.h) return false;
+    // The annexes are bolted onto the side, so the shell doesn't close across where they meet the
+    // building — each one's own partition wall, with the doorway in it, is the boundary there.
+    if (inAnnexFootprint(tx, tz)) return false;
     if (tz === BUILD_MAX_Z + 1) {                                   // entrance row
         const [lo, hi] = gateXRange();
         return tx < lo || tx > hi;                                  // open for the gate room's width
@@ -296,7 +356,7 @@ export function wallAdjacent(state, tx, tz) {
 // Which way a wall fitting on this tile should face. A fitting hangs on a wall, so its rotation
 // isn't the player's to get wrong: it's decided by where the wall actually is. Snapped at
 // placement (and again on a move) rather than only at render time, so the saved rotation always
-// matches what's drawn — otherwise a fitting whose wall later disappeared would go on facing a
+// matches what's drawn. Otherwise a fitting whose wall later disappeared would go on facing a
 // direction with nothing behind it, which is exactly what "floating in mid-air" looks like.
 // Keeps the requested rotation when that side happens to be a wall, so a player who deliberately
 // picked one of two walls on a corner tile gets the one they picked.
@@ -322,8 +382,13 @@ export function canPlace(state, type, tx, tz, rot, ignoreId) {
     const foot = footTiles(type, tx, tz, rot);
     for (const [x, z] of foot) {
         if (x < 0 || z < 0 || x >= GRID || z > BUILD_MAX_Z) return { ok: false, why: 'out of bounds' };
+        // Annexes are checked before ownership: they sit outside every purchasable plot, so the
+        // ownership test would otherwise answer "unowned land" for the break room and the
+        // stockroom — technically true, but it reads as "buy this plot" for ground that is never
+        // for sale.
+        if (inBreakRoom(state, x, z)) return { ok: false, why: 'the break room' };
+        if (inStockRoom(state, x, z)) return { ok: false, why: 'the stockroom' };
         if (!isTileOwned(state.ownedZones, x, z)) return { ok: false, why: 'unowned land' };
-        if (inBreakRoom(state, x, z)) return { ok: false, why: 'break room' };
         const clash = b.mount ? mountBlocked(state.equipment, x, z, ignoreId)
                     : b.door  ? doorBlocked(state.equipment, x, z, ignoreId)
                               : tileBlocked(state.equipment, x, z, ignoreId, !!b.room);
@@ -362,8 +427,20 @@ export function queueTile(i) {
     return [lo, GRID - 1];
 }
 // Idle staff hang out in the break room instead of loitering by the front door. Spread around its
-// middle, and never on a tile something's standing on — the room is small at first, so a worker
+// middle, and never on a tile something's standing on. The room is small at first, so a worker
 // parked on the coffee machine's tile would be very obvious.
+// Somewhere inside the stockroom to set a crate down: any floor tile the racking isn't on.
+// Spread across them so two people unloading don't stand in each other's models.
+export function stockTile(state, i) {
+    const r = annexRect(state, 'stock');
+    const taken = new Set(annexProps(state, 'stock').map(p => p.tile.join(',')));
+    const spots = [];
+    for (let z = r.z0; z < r.z0 + r.h; z++)
+        for (let x = r.x0; x < r.x0 + r.w; x++)
+            if (!taken.has(`${x},${z}`)) spots.push([x, z]);
+    if (!spots.length) return [r.x0, r.z0];
+    return spots[i % spots.length];
+}
 export function restTile(state, i) {
     const br = breakRoom(state);
     const taken = new Set(breakRoomProps(state).map(p => p.tile.join(',')));
@@ -382,7 +459,8 @@ export function buildNav(state) {
             if (!isWalkableGround(state, tx, tz)) g[tz * GRID + tx] = 1;
     // Only the tiles the break room's furniture actually stands on block movement — the rest of
     // its floor stays walkable so staff can mill about in there.
-    for (const p of breakRoomProps(state)) g[p.tile[1] * GRID + p.tile[0]] = 1;
+    for (const kind of ANNEX_KINDS)
+        for (const p of annexProps(state, kind)) g[p.tile[1] * GRID + p.tile[0]] = 1;
     for (const e of state.equipment) {
         // Floor, doorways and wall-mounted kit are all things you walk through or past, not round.
         if (BUILD[e.type].room || BUILD[e.type].door || BUILD[e.type].mount) continue;
@@ -391,14 +469,14 @@ export function buildNav(state) {
     }
     // Partition walls block the edge between two tiles rather than a tile itself, so a room costs
     // no floor space to wall off and staff simply have to come in through the door. Carried on the
-    // nav array itself so it can't be passed around half-applied — see aStar().
+    // nav array itself so it can't be passed around half-applied. See aStar().
     const walls = new Uint8Array(GRID * GRID);
     for (const [kind, tiles] of roomAreas(state)) {
-        const doors = kind === 'break' ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
+        const doors = ANNEX_KINDS.includes(kind) ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
         for (const key of tiles) {
             const [x, z] = key.split(',').map(Number);
             for (const [dx, dz, bit, opp] of EDGE_DIRS) {
-                if (tiles.has(`${x + dx},${z + dz}`)) continue;          // interior — no wall here
+                if (tiles.has(`${x + dx},${z + dz}`)) continue;          // interior, no wall here
                 if (doors.has(`${key}|${dx},${dz}`)) continue;           // left open as the way in
                 if (x >= 0 && z >= 0 && x < GRID && z < GRID) walls[z * GRID + x] |= bit;
                 const nx = x + dx, nz = z + dz;
