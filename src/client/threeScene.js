@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { BUILD, ZONES, PROTOCOLS, COND_SLOW_THRESHOLD, SUITED_ROOM_KINDS } from './data.js';
 import {
     GRID, BUILD_MAX_Z, breakRoom, breakRoomProps, roomAreas, roomDoorways, breakRoomDoorway,
-    ANNEX_KINDS, annexRect, annexProps, annexLevel, inAnnexFootprint,
+    ANNEX_KINDS, annexRect, annexProps, annexLevel, inAnnexFootprint, annexDoorways,
     tileToWorld, footTiles, zoneAt, gateXRange, isShellWall
 } from './grid.js';
 
@@ -72,6 +72,12 @@ const HINGE_OPEN = { centrifuge: -Math.PI / 2, cold: -1.15 };   // the lid stops
 const HINGE_SPEED = 6;
 const ROOM_WALL_H = 0.85;      // lab rooms: tall enough to read as sealed
 const BREAK_WALL_H = 0.3;      // break room: low enough to see over. See _rebuildRoomWalls()
+// Sideways component added to the crowd-separation push, as a fraction of it, so two people who
+// meet head-on step around each other instead of shoving back and forth. Added to the straight-
+// apart push rather than rotating it: rotating traded separation for sidestep and left them
+// overlapping longer, where adding keeps the full separating force and just angles the escape.
+// See _separatePeople().
+const PASS_BIAS = 0.8;
 // How dark a machine gets at zero condition. Dull and grimy, still readable as itself.
 const SHADE_MIN = 0.5;
 const DIR4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
@@ -440,7 +446,7 @@ class LabScene {
             // walking the long way round a boundary that isn't drawn any more, which is precisely
             // the "they walk through the break room wall" complaint in reverse.
             const H = ANNEX_KINDS.includes(kind) ? BREAK_WALL_H : ROOM_WALL_H;
-            const doors = ANNEX_KINDS.includes(kind) ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
+            const doors = ANNEX_KINDS.includes(kind) ? annexDoorways(state, kind, tiles) : roomDoorways(state, tiles, kind);
             for (const key of tiles) {
                 const [tx, tz] = key.split(',').map(Number);
                 const w = tileToWorld(tx, tz);
@@ -1386,12 +1392,20 @@ class LabScene {
 
         // Held mop, hidden except while actively mopping (animated in the render loop below) —
         // this is how "currently cleaning" reads now, instead of tinting the whole coat.
+        // Built around the head, not the hands: the group's origin IS the mop head, sitting on
+        // the floor in front of the worker, with the handle running up and back to chest height.
+        // It used to hang off the hip with the head floating at 0.4 — a stick waggling beside
+        // somebody rather than a mop being pushed along the ground.
         const mop = new THREE.Group();
-        const handle = box(0.045, 0.72, 0.045, 0x8a6339); handle.position.y = 0.36; mop.add(handle);
-        const head2 = box(0.16, 0.12, 0.1, 0xe4dfd2); head2.position.y = -0.02; mop.add(head2);
-        mop.position.set(0.2, 0.42, 0.14);
-        mop.rotation.z = 0.4;
+        const handle = box(0.05, 0.78, 0.05, 0x8a6339); handle.position.y = 0.39; mop.add(handle);
+        const head2 = box(0.32, 0.08, 0.18, 0xe4dfd2); head2.position.y = 0.04; mop.add(head2);
+        const collar = box(0.08, 0.06, 0.08, 0x6b7075); collar.position.y = 0.1; mop.add(collar);
+        const MOP_REST = { x: 0.13, y: 0.03, z: 0.42, tilt: -0.78 };
+        mop.position.set(MOP_REST.x, MOP_REST.y, MOP_REST.z);
+        mop.rotation.x = MOP_REST.tilt;                 // top of the handle leans back to the hands
         mop.visible = false;
+        mop.userData.rest = MOP_REST;
+        g.userData.mopHead = head2;
         body.add(mop);
 
         g.userData.body = body; g.userData.coat = coat; g.userData.mop = mop;
@@ -1862,10 +1876,40 @@ class LabScene {
                 mesh.userData.facing += diff * 0.25;
                 mesh.rotation.y = mesh.userData.facing;
             }
+            mesh.userData.moving = moving;
             mesh.userData.body.position.y = moving ? Math.abs(Math.sin(this.elapsed * 10)) * 0.06 : 0;
             const mop = mesh.userData.mop;
             mop.visible = mesh.userData.mopping;
-            if (mesh.userData.mopping) mop.rotation.z = 0.15 + Math.abs(Math.sin(this.elapsed * 6.5)) * 0.75;
+            if (mesh.userData.mopping) {
+                // A push-pull scrub, not a windscreen wiper. Previously only the handle's pivot
+                // was animated, so the stick swung while the scientist stood perfectly rigid.
+                // Now the head travels across the floor, the handle rakes with it, the head
+                // squashes on the forward press, and the body leans into the stroke and rocks —
+                // the motion reads as somebody working rather than a prop being waggled.
+                const t = this.elapsed * 3.6;
+                const stroke = Math.sin(t);                     // -1 drawn back, +1 pushed out
+                const press = Math.max(0, stroke);              // weight only goes on the push
+                const rest = mop.userData.rest;
+                // The head stays on the floor and slides; the handle stands up as it's pushed
+                // away and rakes back as it's drawn in, which is what the stroke actually looks
+                // like. A little sideways wander so consecutive strokes aren't identical.
+                mop.position.z = rest.z + stroke * 0.26;
+                mop.position.x = rest.x + Math.sin(t * 0.5) * 0.12;
+                mop.position.y = rest.y;
+                mop.rotation.x = rest.tilt + stroke * 0.30;
+                mop.rotation.z = Math.sin(t * 0.5) * 0.14;
+                const head = mesh.userData.mopHead;
+                if (head) { head.scale.set(1 + press * 0.25, 1 - press * 0.3, 1); }
+                // The body follows the mop: leans out on the push, straightens on the pull, with
+                // a little sway so the two strokes don't look identical.
+                const bd = mesh.userData.body;
+                bd.rotation.x = stroke * 0.13;
+                bd.rotation.z = Math.sin(t * 0.5) * 0.05;
+                bd.position.y = press * 0.02;
+            } else if (mesh.userData.body.rotation.x || mesh.userData.body.rotation.z) {
+                mesh.userData.body.rotation.x = 0;
+                mesh.userData.body.rotation.z = 0;
+            }
             this._updateChatter(mesh);
         });
         this.crateMeshes.forEach((mesh) => {
@@ -1883,6 +1927,7 @@ class LabScene {
                 mesh.userData.facing += diff * 0.25;
                 mesh.rotation.y = mesh.userData.facing;
             }
+            mesh.userData.moving = moving;
             mesh.userData.body.position.y = moving ? Math.abs(Math.sin(this.elapsed * 9)) * 0.06 : 0;
             const working = mesh.userData.working;
             if (mesh.userData.kit) {
@@ -2023,9 +2068,24 @@ class LabScene {
                     dx = Math.cos(ang); dz = Math.sin(ang); d = 1;
                 }
                 const push = (MIN_DIST - d) * PUSH;
+                // Rotate the push off the line joining them. Pushing straight apart is the one
+                // direction that doesn't resolve a head-on meeting: two people carrying crates
+                // through the same doorway shove each other back the way they came, re-approach,
+                // and jostle on the spot — the "tug of war". A consistent sideways bias makes
+                // them step around one another instead. Both are rotated the same way, so they
+                // still move in exactly opposite directions and neither drifts.
                 const nx = dx / d, nz = dz / d;
-                a.position.x -= nx * push; a.position.z -= nz * push;
-                b.position.x += nx * push; b.position.z += nz * push;
+                // (-nz, nx) is perpendicular to the line joining them; both get the same one, so
+                // they slide past on opposite sides and neither drifts.
+                //
+                // Only while somebody is actually walking, though. The bias exists to break a
+                // head-on meeting in a doorway; applied to two people stood still it turns the
+                // push into a tangent and they circle each other on the spot instead of parting,
+                // which is what the break room looked like.
+                const bias = (a.userData.moving || b.userData.moving) ? PASS_BIAS : 0;
+                const rx = nx + -nz * bias, rz = nz + nx * bias;
+                a.position.x -= rx * push; a.position.z -= rz * push;
+                b.position.x += rx * push; b.position.z += rz * push;
             }
         }
         // Cap how far the nudging above is allowed to shift anyone. This used to only apply to

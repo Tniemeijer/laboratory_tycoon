@@ -17,7 +17,7 @@ import { aStar, nearestAccess } from '../pathfind.js';
 import { addDirt, recomputeGrime, topDirtTile } from './dirt.js';
 import { curStep, isInert } from './samples.js';
 import { completeContract } from './contracts.js';
-import { stageSample, batchReady, startRun } from './equipment.js';
+import { stageSample, batchReady, startRun, runShortage } from './equipment.js';
 import { isBurning, isQuarantined } from './incidents.js';
 import { underService } from './visitors.js';
 import { addStock } from './economy.js';
@@ -141,6 +141,83 @@ function stepPath(w, dt) {
     return 'moving';
 }
 function setGoalTile(w, tile) { w.goal = tile; w.path = null; }
+
+// ---------- giving way ----------
+// Someone standing about with nothing to do gets out of the way of someone working. Without this
+// the two just overlap: the renderer's separation pass nudges both of them a little every frame
+// and neither ever settles, which is the visible "dancing on the spot" when a worker stops to
+// operate a machine on a tile somebody was already idling on.
+//
+// Only the idle one moves, and it moves the *simulated* position rather than the drawn one, so it
+// actually stands somewhere else rather than being cosmetically shoved back every frame.
+const PERSONAL_SPACE = 0.62;
+const GIVE_WAY_SPEED = 1.5;
+// Who actually needs the exact square they're stood on.
+//   2  attending a machine, or a contractor doing a job: it has to be this tile
+//   1  mopping: the tile matters, but they can clean it from half a step over
+//   0  idle or resting: no claim at all
+// Only a weaker claim moves. Without a tie-break like this, two people who both stopped on the
+// same tile get shoved apart by the renderer and pulled back by their own target every frame, and
+// neither ever settles. It isn't enough to handle the idle case: a cleaner mopping the tile a
+// colleague is attending the bench from is two *busy* people, and they danced just the same.
+const NO_CLAIM = new Set(['idle', 'resting', 'evacuatingDone', 'sickDone']);
+const LOOSE_CLAIM = new Set(['mopping', 'toMop']);
+// Anything not listed is treated as a hard claim, which is what visitors' own states fall into.
+function spotClaim(p) {
+    if (NO_CLAIM.has(p.state)) return 0;
+    if (LOOSE_CLAIM.has(p.state)) return 1;
+    return 2;
+}
+// Only people who have stopped are worth moving. Anyone mid-walk resolves a collision by simply
+// carrying on, and nudging them just fights their pathing.
+const STATIONARY = new Set(['idle', 'resting', 'mopping', 'atStation', 'prepping', 'filling',
+                            'storing', 'operating', 'tending', 'stocking', 'evacuatingDone', 'sickDone']);
+// Can this worker stand here? Same rules the pathfinder uses, so giving way can never put someone
+// inside a wall or through a partition.
+function canStandAt(w, x, z) {
+    const from = worldToTile(w.wx, w.wz), to = worldToTile(x, z);
+    if (to.tx === from.tx && to.tz === from.tz) return true;
+    if (to.tx < 0 || to.tz < 0 || to.tx >= GRID || to.tz >= GRID) return false;
+    const g = nav();
+    if (g[to.tz * GRID + to.tx]) return false;
+    const dx = to.tx - from.tx, dz = to.tz - from.tz;
+    if (Math.abs(dx) + Math.abs(dz) !== 1) return false;          // orthogonal steps only
+    const bit = dx === 1 ? 8 : dx === -1 ? 4 : dz === 1 ? 2 : 1;  // wall on the edge we'd cross
+    if (g.walls && (g.walls[from.tz * GRID + from.tx] & bit)) return false;
+    return true;
+}
+function giveWay(w, dt) {
+    const s = G.state;
+    if (!STATIONARY.has(w.state)) return;
+    const mine = spotClaim(w);
+    let ax = 0, az = 0, n = 0;
+    // Contractors count as people to get out of the way of, same as colleagues: a mechanic at a
+    // machine or a crew fogging a room is there to do a job.
+    for (const o of [...s.staff, ...(s.visitors || [])]) {
+        if (o === w) continue;
+        const theirs = spotClaim(o);
+        if (theirs < mine) continue;                       // they have less business here
+        // Equal standing — two idle people sharing a rest tile, say. Somebody still has to be the
+        // one who moves, or both sit there being nudged by the renderer and circle each other.
+        // The higher id yields: arbitrary, but consistent, so they don't both step the same way.
+        if (theirs === mine && (w.id <= o.id || !STATIONARY.has(o.state))) continue;
+        const dx = w.wx - o.wx, dz = w.wz - o.wz;
+        const d = Math.hypot(dx, dz);
+        if (d >= PERSONAL_SPACE) continue;
+        if (d < 1e-3) {
+            // Exactly coincident: pick a direction off this worker's id so the two of them don't
+            // choose the same one and shuffle together.
+            const a = (w.id % 8) / 8 * Math.PI * 2;
+            ax += Math.cos(a); az += Math.sin(a);
+        } else { ax += dx / d; az += dz / d; }
+        n++;
+    }
+    if (!n) return;
+    const m = Math.hypot(ax, az) || 1;
+    const step = GIVE_WAY_SPEED * dt;
+    const nx = w.wx + ax / m * step, nz = w.wz + az / m * step;
+    if (canStandAt(w, nx, nz)) { w.wx = nx; w.wz = nz; }
+}
 
 // A worker's level at a given task (cap), derived from accumulated XP rather than stored
 // directly. Keeps the save format simple and means tuning SKILL_XP_PER_LEVEL retroactively
@@ -271,9 +348,16 @@ let _stockSpot = 0;
 function pickCrateJob(w) {
     const s = G.state;
     if (!s.deliveries || !s.deliveries.length) return false;
+    // A claim is only real while a live worker is actually on that job. Anything else is a stale
+    // claim, and a stale claim strands the crate permanently, so it's treated as free rather than
+    // trusted. Belt and braces on top of the reset in loadSave: this is the kind of bookkeeping
+    // that quietly rots the moment a new code path forgets to release something.
+    const held = new Set();
+    for (const o of s.staff) if (o.job && o.job.crateId != null) held.add(o.job.crateId);
     const from = worldToTile(w.wx, w.wz);
     let crate = null, bestD = Infinity;
     for (const c of s.deliveries) {
+        if (c.claimedBy != null && !held.has(c.id)) c.claimedBy = null;   // stale, reclaim it
         if (c.claimedBy) continue;
         const t = worldToTile(c.wx, c.wz);
         const d = Math.abs(t.tx - from.tx) + Math.abs(t.tz - from.tz);
@@ -421,9 +505,17 @@ function assignJob(w) {
 // run per idle worker per tick. These lists are short, and it short-circuits on the first hit.
 function labIsQuiet() {
     const s = G.state;
-    if (s.samples.some(sm => sm.state === 'queued' || sm.state === 'staged')) return false;
-    if (s.deliveries && s.deliveries.length) return false;
-    if (s.equipment.some(e => e.staged && e.staged.length)) return false;
+    if (s.deliveries && s.deliveries.length) return false;            // crates to shelve, right now
+    // A queued sample is only pending work if there's somewhere it could actually go.
+    if (s.samples.some(sm => sm.state === 'queued' && stationsFor(curStep(sm).cap).length)) return false;
+    // And a staged batch only counts if it could actually run. One that's stopped for want of
+    // consumables will not become available until a delivery lands — and a delivery brings crates,
+    // which makes the lab busy again on its own. Counting it kept everyone stood to attention
+    // beside a machine that was never going to start, instead of going back to the break room.
+    for (const e of s.equipment) {
+        if (!e.staged || !e.staged.length) continue;
+        if (!runShortage(e.staged[0].cap, e.staged[0].proto, 1)) return false;
+    }
     return true;
 }
 
@@ -466,6 +558,8 @@ export function updateStaff(dt) {
         }
         if (w.state === 'sickDone') { w.state = 'idle'; w.path = null; }
 
+        giveWay(w, dt);              // whoever needs this square least steps off it
+
         if (w.state === 'idle' || w.state === 'resting') {
             if (!assignJob(w)) {
                 if (w.state === 'resting') {
@@ -490,6 +584,18 @@ export function updateStaff(dt) {
                 continue;
             }
             w.idleTimer = 0;
+        }
+
+        // Every state below reads w.job. They're always set together — resetWorker() clears the
+        // job and drops the worker to 'idle' in the same breath — but if that ever came apart,
+        // the dereference below would throw out of updateStaff and take the whole tick loop with
+        // it: no staff, no samples, no clock. Cheap to make that a recoverable hiccup instead.
+        if (!w.job && w.state !== 'idle' && w.state !== 'resting' &&
+            w.state !== 'evacuating' && w.state !== 'evacuatingDone' &&
+            w.state !== 'sick' && w.state !== 'sickDone') {
+            console.warn('worker in state', w.state, 'with no job — resetting');
+            resetWorker(w);
+            continue;
         }
 
         switch (w.state) {

@@ -284,6 +284,12 @@ function loadSave() {
         const s = G.state;
         s.offers ||= []; s.contracts ||= []; s.samples ||= []; s.staff ||= [];
         s.equipment ||= []; s.reagents ||= []; s.dirt ||= {}; s.warns = {};
+        // Crates carry a claim for the same reason dirt tiles and machines do, and it needs the
+        // same reset: every worker's job is wiped below, so a claim written before the save can
+        // never still be backed by a live worker. Left alone it strands that crate forever —
+        // pickCrateJob skips anything claimed, so the delivery simply sits in the doorway and
+        // nobody ever collects it.
+        for (const c of s.deliveries || []) c.claimedBy = null;
         // Every worker's job is about to get wiped below, so no dirtClaims entry from the old
         // save can possibly still be backed by a live worker — a hard reset, not just a default
         // for when it's missing, otherwise an orphaned claim makes topDirtTile() skip that tile

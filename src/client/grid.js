@@ -52,6 +52,12 @@ const ANNEXES = {
     },
     stock: {
         upgrade: 'storage',
+        // The whole side facing the work floor is open, not a single door. Every delivery is
+        // carried in by hand, so one doorway tile becomes a bottleneck the moment two people are
+        // stocking at once: they pile into the same square, shove each other about and crawl.
+        // A loading bay with a wide mouth is also what a stockroom actually looks like, whereas
+        // the break room keeps its single door (you don't want the lab open onto the coffee).
+        wideOpening: true,
         max: { x0: 12, z0: 12, w: 4, h: 3 },
         tiers: [
             { x0: 12, z0: 12, w: 2, h: 2 },   // no upgrade — one rack by the door
@@ -208,12 +214,13 @@ export function roomDoorways(state, tiles, kind) {
 // The break room is the one area the player doesn't build, so it keeps an automatic doorway rather
 // than needing a door placed in it: whichever edge opens onto usable floor, preferring the side the
 // traffic comes from.
-export function breakRoomDoorway(state, tiles) {
+export function annexDoorways(state, kind, tiles) {
     const doors = new Set();
     // A doorway is no use in a tile you can't stand in. The annex props are nav obstacles, so a
-    // door picked on a tile with a rack (or a vending machine) on it seals the room off entirely
-    // — which is exactly what happened when the stockroom's racking reached its door column.
+    // door picked on a tile with a rack (or a vending machine) on it seals the room off entirely,
+    // which is exactly what happened when the stockroom's racking reached its door column.
     const blocked = new Set(ANNEX_KINDS.flatMap(k => annexProps(state, k).map(p => p.tile.join(','))));
+    const wide = !!(ANNEXES[kind] && ANNEXES[kind].wideOpening);
     for (const group of roomGroups(tiles)) {
         let best = null, bestRank = Infinity;
         for (const key of [...group].sort()) {
@@ -222,13 +229,18 @@ export function breakRoomDoorway(state, tiles) {
             DOOR_PREF.forEach(([dx, dz], i) => {
                 if (tiles.has(`${x + dx},${z + dz}`)) return;
                 if (!doorwayUsable(state, x + dx, z + dz, tiles)) return;
+                // A wide-mouthed annex opens every edge that faces usable floor, so a queue of
+                // people carrying crates can spread out instead of funnelling through one square.
+                if (wide) { doors.add(`${key}|${dx},${dz}`); return; }
                 if (i < bestRank) { bestRank = i; best = `${key}|${dx},${dz}`; }
             });
         }
-        if (best) doors.add(best);
+        if (!wide && best) doors.add(best);
     }
     return doors;
 }
+// Kept for the renderer and nav, which both ask about the break room by name.
+export function breakRoomDoorway(state, tiles) { return annexDoorways(state, 'break', tiles); }
 
 // Connected runs of room that have no usable way in, for warning the player about.
 export function sealedRooms(state) {
@@ -472,7 +484,7 @@ export function buildNav(state) {
     // nav array itself so it can't be passed around half-applied. See aStar().
     const walls = new Uint8Array(GRID * GRID);
     for (const [kind, tiles] of roomAreas(state)) {
-        const doors = ANNEX_KINDS.includes(kind) ? breakRoomDoorway(state, tiles) : roomDoorways(state, tiles, kind);
+        const doors = ANNEX_KINDS.includes(kind) ? annexDoorways(state, kind, tiles) : roomDoorways(state, tiles, kind);
         for (const key of tiles) {
             const [x, z] = key.split(',').map(Number);
             for (const [dx, dz, bit, opp] of EDGE_DIRS) {
