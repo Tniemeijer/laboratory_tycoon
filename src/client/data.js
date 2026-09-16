@@ -88,7 +88,9 @@ export const INGREDIENTS = {
 // the same £200 flow cell as a run with four. That's what makes filling a batch worth waiting for.
 export const SUPPLIES = {
     disposable: { name: 'Disposables',     unit: 'packs', cost: 6,   perSample: true,  caps: null },
-    slide:      { name: 'Slides',          unit: 'boxes', cost: 15,  perSample: true,  caps: ['image'] },
+    // Slides aren't tied to a cap: they're charged to whichever step mounts the specimen, which is
+    // the one before it gets looked at. See suppliesForStep() below.
+    slide:      { name: 'Slides',          unit: 'boxes', cost: 15,  perSample: true,  caps: null },
     fluorlabel: { name: 'Fluor. Labels',   unit: 'vials', cost: 48,  perSample: true,  caps: ['fluoresce'] },
     column:     { name: 'HPLC Columns',    unit: 'ea',    cost: 95,  perSample: false, caps: ['chroma'] },
     flowcell:   { name: 'Flow Cells',      unit: 'ea',    cost: 220, perSample: false, caps: ['sequence'] }
@@ -99,6 +101,39 @@ export const SUPPLY_FOR_CAP = (() => {
     for (const [key, s] of Object.entries(SUPPLIES)) for (const c of (s.caps || [])) m[c] = key;
     return m;
 })();
+
+// The steps where a specimen is actually looked at down a lens.
+export const IMAGING_CAPS = new Set(['image', 'image_contain', 'fluoresce']);
+
+// Steps where nobody handles the specimen: writing up a result is desk work, so it burns no
+// gloves, tubes or tips the way bench work does. Every other step gets disposables.
+export const DRY_CAPS = new Set(['analyze']);
+
+// Everything a given step of a given protocol burns: disposables for any step where somebody
+// handles the sample, whatever its own cap calls for, and a slide for the step that mounts the
+// specimen.
+//
+// That last one is the point of this function. The slide is charged to the step *before* the
+// imaging one rather than to the imaging itself, because that is where the sample physically
+// becomes a slide. The renderer has always drawn it that way -- a sample whose next step is
+// imaging is drawn as a slide -- so charging at the microscope meant it turned into a slide a
+// whole step before anybody paid for one. Mounting is the prep's job; the scope only reads what
+// it is handed. For a Tissue panel that means the prep costs disposables and a slide, and for DNA
+// it is the spin that does, being the step that comes before the imaging there.
+export function suppliesForStep(proto, index) {
+    const steps = PROTOCOLS[proto].steps;
+    const st = steps[index];
+    if (!st) return ['disposable'];
+    const out = DRY_CAPS.has(st.cap) ? [] : ['disposable'];
+    if (SUPPLY_FOR_CAP[st.cap]) out.push(SUPPLY_FOR_CAP[st.cap]);
+    const next = steps[index + 1];
+    if (next && IMAGING_CAPS.has(next.cap)) out.push('slide');
+    return out;
+}
+// Same thing, found by cap. No protocol uses a cap twice, so the first match is the step.
+export function suppliesForCap(proto, cap) {
+    return suppliesForStep(proto, PROTOCOLS[proto].steps.findIndex(x => x.cap === cap));
+}
 
 // Suppliers quote a fresh price every morning: a random walk that's pulled gently back towards the
 // list price, so it wanders without ever running away. Buying the week's solvent while it's cheap
@@ -310,6 +345,74 @@ export const SKILL_MAX_LEVEL = 5;
 export const SKILL_SPEED_PER_LEVEL = 0.035;      // -3.5% run time per level at that cap, up to -17.5% at max
 export const SKILL_QUALITY_PER_LEVEL = 0.015;    // +1.5% quality per level at that cap, up to +7.5% at max
 
+// ---------- the people ----------
+// Two separate systems, deliberately. TRAITS are innate: rolled when somebody is hired, never
+// change, and are as often a drawback as a benefit. They exist so a roster is a set of characters
+// rather than interchangeable tokens, and so "who do I let go" is a real question. PERKS are
+// earned: the player picks one each time a scientist gains a career level, and they are always
+// good. Traits are who someone is, perks are what you have trained them into.
+//
+// Every effect below is a multiplier applied on top of the existing per-cap skill numbers, so the
+// two stack rather than one replacing the other. wage is the one that costs you: a brilliant
+// scientist is dearer every single day, which is the whole trade.
+export const STAFF_TRAITS = {
+    meticulous:  { name: 'Meticulous',   good: true,  wage: 1.15, quality: 1.05, speed: 1.08,
+                   desc: 'Takes the extra minute. Cleaner results, slower runs.' },
+    quick:       { name: 'Quick Hands',  good: true,  wage: 1.15, speed: 0.90, quality: 0.98,
+                   desc: 'Fast on the bench, and it shows a little in the numbers.' },
+    brisk:       { name: 'Brisk',        good: true,  wage: 1.08, walk: 1.25,
+                   desc: 'Moves through the lab at a clip. Less of the day spent in transit.' },
+    tidy:        { name: 'Tidy',         good: true,  wage: 1.05, mop: 1.4,
+                   desc: 'Cleans up fast and without being asked twice.' },
+    gentle:      { name: 'Gentle',       good: true,  wage: 1.1,  wear: 0.75,
+                   desc: 'Easy on the equipment. Machines they run last noticeably longer.' },
+    studious:    { name: 'Studious',     good: true,  wage: 1.12, xp: 1.5,
+                   desc: 'Picks things up quickly. Levels a skill in about two thirds the runs.' },
+    strong:      { name: 'Strong',       good: true,  wage: 1.06, carry: 1,
+                   desc: 'Carries one more sample per trip than anybody else.' },
+    dawdler:     { name: 'Dawdler',      good: false, wage: 0.82, walk: 0.78,
+                   desc: 'In no particular hurry to get anywhere. Cheap, though.' },
+    heavyHanded: { name: 'Heavy-Handed', good: false, wage: 0.85, wear: 1.5,
+                   desc: 'Rough with the kit. Expect the mechanic more often.' },
+    sloppy:      { name: 'Sloppy',       good: false, wage: 0.8,  quality: 0.94,
+                   desc: 'Results come out a touch worse than they should.' },
+    slow:        { name: 'Ponderous',    good: false, wage: 0.8,  speed: 1.15,
+                   desc: 'Every run takes them longer than it takes anyone else.' },
+    grubby:      { name: 'Grubby',       good: false, wage: 0.88, mop: 0.6,
+                   desc: 'Will mop, eventually, badly.' }
+};
+// Rolled at hire: one trait, and sometimes a second. A scientist is never given two traits that
+// pull the same lever in opposite directions -- see rollTraits() in systems/staff.js.
+export const TRAIT_SECOND_CHANCE = 0.45;
+
+export const STAFF_PERKS = {
+    specialist:  { name: 'Specialist',   speed: 0.9,   desc: 'Ten percent off every run they start.' },
+    steadyHands: { name: 'Steady Hands', quality: 1.04, desc: 'Everything they touch comes out a little cleaner.' },
+    nimble:      { name: 'Nimble',       walk: 1.2,    desc: 'Crosses the floor faster.' },
+    porter:      { name: 'Porter',       carry: 1,     desc: 'Carries one more sample per trip.' },
+    caretaker:   { name: 'Caretaker',    wear: 0.7,    desc: 'Machines they run wear far more slowly.' },
+    quickLearn:  { name: 'Quick Study',  xp: 1.4,      desc: 'Gains skill faster from here on.' },
+    janitor:     { name: 'Janitor',      mop: 1.5,     desc: 'Mops in a fraction of the time.' },
+    efficient:   { name: 'Efficient',    wage: 0.85,   desc: 'Knows their worth, and takes a little less of it.' }
+};
+
+// Career XP is separate from per-cap skill: every run grants both, but career XP counts the whole
+// body of work rather than one task, so a generalist levels as readily as a specialist. Levels are
+// derived from XP rather than stored, same as skills, so retuning re-levels old saves correctly.
+export const CAREER_XP_PER_RUN = 10;
+export const CAREER_XP_PER_EXTRA_SAMPLE = 2;
+export const CAREER_XP_PER_LEVEL = 140;
+export const CAREER_MAX_LEVEL = 6;
+export const PERK_CHOICES = 3;            // how many perks are offered at each level-up
+
+// Payroll. Scientists used to cost a one-off hiring fee and then nothing at all, which made an
+// experienced roster strictly free to keep and firing anybody irrational. Now they draw a wage
+// every day, it scales with the career levels you have invested in them, and their traits bend it
+// either way. That is the cost side of the perk system: a veteran is genuinely better and
+// genuinely expensive, and a cheap dawdler has a place on the payroll.
+export const WAGE_BASE = 42;
+export const WAGE_PER_LEVEL = 16;
+
 /** @type {Record<string, {name:string, minLevel:number, steps:ProtocolStep[]}>} */
 // A protocol's prep step uses the generic 'prep' cap (any Bench or Prep Robot) unless the work
 // itself demands a specialized cabinet — live-culture work needs 'prep_bio' (Flow Hood only),
@@ -407,6 +510,15 @@ export const CANCEL_FEE_FACTOR = 0.2;
 // so churning staff to dodge wages doesn't pay. (Distinct from FIRE_REP_PENALTY above, which is
 // about the building being on fire.)
 export const DISMISS_REP_PENALTY = 6;
+
+// Receivership. A lab could previously run arbitrarily deep into the red forever: the warning
+// fired once and the interest simply kept coming, which is a slow fade rather than a defeat. Past
+// this much debt the bank steps in, sells the most valuable thing on the floor each morning
+// against what is owed, and gives you this many days to climb back above the line. Failing that,
+// the run is over, which is what makes the good runs mean anything.
+export const RECEIVERSHIP_DEBT = -4000;
+export const RECEIVERSHIP_GRACE_DAYS = 4;
+export const RECEIVERSHIP_SALE_FACTOR = 0.45;    // what the bank gets for your kit, being a forced sale
 
 export const REP_LEVELS = [0, 150, 380, 720, 1150];
 export const DAY_LENGTH = 60;

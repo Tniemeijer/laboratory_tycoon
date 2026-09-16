@@ -17,8 +17,7 @@ import {
     WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE, COND_SLOW_THRESHOLD, COND_SLOW_MAX,
     COND_BREAKDOWN_THRESHOLD, COND_BREAKDOWN_CHANCE_MAX, MECH_MAINT_THRESHOLD,
     MECH_CALLOUT_FEE, MECH_REPAIR_COST, MECH_SERVICE_COST,
-    ROOM_QUALITY_BONUS, SUPPLIES, SUPPLY_FOR_CAP
-} from '../data.js';
+    ROOM_QUALITY_BONUS, SUPPLIES, SUPPLY_FOR_CAP, suppliesForCap} from '../data.js';
 import { G, cleanliness, speedMul, insideAnyRoom, dirtyUI } from '../core.js';
 import { takeStock } from './economy.js';
 import { addDirt } from './dirt.js';
@@ -59,9 +58,7 @@ export function stageSample(st, sm) {
 // the shelf is restocked, so an empty stockroom is a stoppage, not a tax.
 export function runShortage(cap, proto, n) {
     const s = G.state;
-    const needed = ['disposable'];
-    if (SUPPLY_FOR_CAP[cap]) needed.push(SUPPLY_FOR_CAP[cap]);
-    for (const key of needed) {
+    for (const key of suppliesForCap(proto, cap)) {
         const want = SUPPLIES[key].perSample ? n : 1;
         if ((s.supplies[key] || 0) < want) return SUPPLIES[key].name;
     }
@@ -138,9 +135,7 @@ export function startRun(st, group) {
     // items scale with the batch; the expensive per-run ones (a flow cell, a column) are charged
     // once no matter how full the machine is, which is exactly why it's worth waiting for a
     // fuller batch.
-    const needed = ['disposable'];
-    if (SUPPLY_FOR_CAP[cap]) needed.push(SUPPLY_FOR_CAP[cap]);
-    for (const key of needed) takeStock(key, SUPPLIES[key].perSample ? n : 1);
+    for (const key of suppliesForCap(proto, cap)) takeStock(key, SUPPLIES[key].perSample ? n : 1);
 
     const clFactor = cleanliness() / 100;
     let dur = step.t * (b.timeMul[cap] || 1) * speedMul();

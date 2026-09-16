@@ -9,9 +9,9 @@ import {
     BATCH_LOAD_TIME, IDLE_GRACE_PERIOD, STOCK_UNLOAD_TIME, DISMISS_REP_PENALTY,
     SKIN_TONES, HAIR_COLORS,
     SKILL_CAP_ALIAS, SKILL_XP_PER_RUN, SKILL_XP_PER_EXTRA_SAMPLE, SKILL_XP_PER_LEVEL, SKILL_MAX_LEVEL,
-    SKILL_SPEED_PER_LEVEL, SKILL_QUALITY_PER_LEVEL
-} from '../data.js';
-import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyUI, cartCapacity, equipCaps } from '../core.js';
+    SKILL_SPEED_PER_LEVEL, SKILL_QUALITY_PER_LEVEL,
+    STAFF_TRAITS, STAFF_PERKS, TRAIT_SECOND_CHANCE, CAREER_XP_PER_RUN, CAREER_XP_PER_EXTRA_SAMPLE, PERK_CHOICES, CAREER_MAX_LEVEL, WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE} from '../data.js';
+import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyUI, cartCapacity, equipCaps, staffMods, careerLevel, perksOwed} from '../core.js';
 import { GRID, tileToWorld, worldToTile, footTiles, restTile, stockTile, gateWorld, musterTile } from '../grid.js';
 import { aStar, nearestAccess } from '../pathfind.js';
 import { addDirt, recomputeGrime, topDirtTile } from './dirt.js';
@@ -23,6 +23,22 @@ import { underService } from './visitors.js';
 import { addStock } from './economy.js';
 
 const STAFF_SPEED = 2.7;
+
+// Rolls a new hire's innate traits: one for certain, sometimes a second. The second is never
+// allowed to pull a lever the first already pulls, so nobody turns up Quick Hands *and* Ponderous
+// and reads as having no traits at all. Purely cosmetic pairs (Tidy plus Gentle) are fine.
+function rollTraits() {
+    const keys = Object.keys(STAFF_TRAITS);
+    const first = keys[Math.floor(Math.random() * keys.length)];
+    const out = [first];
+    if (Math.random() < TRAIT_SECOND_CHANCE) {
+        const levers = (k) => Object.keys(STAFF_TRAITS[k]).filter(x => !['name', 'good', 'desc'].includes(x));
+        const taken = new Set(levers(first));
+        const free = keys.filter(k => k !== first && !levers(k).some(l => taken.has(l)));
+        if (free.length) out.push(free[Math.floor(Math.random() * free.length)]);
+    }
+    return out;
+}
 
 export function hireStaff() {
     const s = G.state;
@@ -38,7 +54,8 @@ export function hireStaff() {
         skin: SKIN_TONES[Math.floor(Math.random() * SKIN_TONES.length)],
         hairColor: HAIR_COLORS[Math.floor(Math.random() * HAIR_COLORS.length)],
         hairLong: Math.random() < 0.5,
-        skillXp: {}
+        skillXp: {},
+        traits: rollTraits(), xp: 0, perks: [], perkChoices: null
     });
     s.hireCost = Math.round(s.hireCost * 1.55);
     G.onToast('Hired a scientist');
@@ -136,7 +153,7 @@ function stepPath(w, dt) {
     const dx = wt.x - w.wx, dz = wt.z - w.wz;
     const d = Math.hypot(dx, dz);
     if (d < 0.1) { w.path.shift(); return w.path.length === 0 ? 'arrived' : 'moving'; }
-    const step = Math.min(d, STAFF_SPEED * staffSpeedMul() * (G.state.evacuating ? EVAC_SPEED_MUL : 1) * dt);
+    const step = Math.min(d, STAFF_SPEED * staffSpeedMul() * staffMods(w).walk * (G.state.evacuating ? EVAC_SPEED_MUL : 1) * dt);
     w.wx += dx / d * step; w.wz += dz / d * step;
     return 'moving';
 }
@@ -231,7 +248,44 @@ function skillLevel(w, cap) {
 function grantSkillXp(w, cap, n) {
     cap = skillCap(cap);
     w.skillXp ||= {};
-    w.skillXp[cap] = (w.skillXp[cap] || 0) + SKILL_XP_PER_RUN + SKILL_XP_PER_EXTRA_SAMPLE * (n - 1);
+    const mul = staffMods(w).xp;
+    w.skillXp[cap] = (w.skillXp[cap] || 0) + (SKILL_XP_PER_RUN + SKILL_XP_PER_EXTRA_SAMPLE * (n - 1)) * mul;
+    // The same run also counts toward the whole career, which is what earns perk picks. Counted
+    // separately from the per-cap skill so a generalist who never specialises still progresses.
+    const before = careerLevel(w);
+    w.xp = (w.xp || 0) + (CAREER_XP_PER_RUN + CAREER_XP_PER_EXTRA_SAMPLE * (n - 1)) * mul;
+    if (careerLevel(w) > before) {
+        offerPerks(w);
+        G.onToast(`${w.name} reached level ${careerLevel(w)}. Pick a skill in Staff`);
+        dirtyUI();
+    }
+}
+
+// Lays out the choices for a level-up. Generated once and stored, so the options do not reshuffle
+// every time the menu re-renders, and perks already taken are never offered twice.
+export function offerPerks(w) {
+    if (w.perkChoices && w.perkChoices.length) return;
+    const taken = new Set(w.perks || []);
+    const pool = Object.keys(STAFF_PERKS).filter(k => !taken.has(k));
+    for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    w.perkChoices = pool.slice(0, PERK_CHOICES);
+}
+// The player's pick. Guarded on actually being owed one so a stale click from an old render
+// cannot hand out a free perk.
+export function choosePerk(id, perk) {
+    const w = G.state.staff.find(x => x.id === id);
+    if (!w || !STAFF_PERKS[perk]) return;
+    if (perksOwed(w) <= 0) return;
+    if (!w.perkChoices || !w.perkChoices.includes(perk)) return;
+    w.perks = w.perks || [];
+    w.perks.push(perk);
+    w.perkChoices = null;
+    if (perksOwed(w) > 0) offerPerks(w);      // two levels at once, still one pick each
+    G.onToast(`${w.name} learned ${STAFF_PERKS[perk].name}`);
+    dirtyUI();
 }
 
 // Which way a machine faces. The models are all built facing +z and then turned by
@@ -506,8 +560,17 @@ function assignJob(w) {
 function labIsQuiet() {
     const s = G.state;
     if (s.deliveries && s.deliveries.length) return false;            // crates to shelve, right now
-    // A queued sample is only pending work if there's somewhere it could actually go.
-    if (s.samples.some(sm => sm.state === 'queued' && stationsFor(curStep(sm).cap).length)) return false;
+    // A queued sample is only pending work if somebody could actually pick it up right now, which
+    // is the same test pickSampleJob() applies: a station for its step that still has room in its
+    // batch. Checking merely that such a machine *exists* counted samples nobody could touch --
+    // the case being a lab blocked on an order, where every bench is already loaded with a batch
+    // that cannot run for want of stock and the rest of the samples sit queued behind it. That
+    // read as pending work, so everyone stood to attention beside a machine that was not going to
+    // start until the delivery arrived the next morning, instead of waiting it out in the break
+    // room. A batch that is merely part-full, and so still wants more, keeps the lab busy exactly
+    // as it did before.
+    if (s.samples.some(sm => sm.state === 'queued' && !sm.storedAt
+        && stationsFor(curStep(sm).cap).length && anyStationWantsMore(curStep(sm).cap))) return false;
     // And a staged batch only counts if it could actually run. One that's stopped for want of
     // consumables will not become available until a delivery lands — and a delivery brings crates,
     // which makes the lab busy again on its own. Counting it kept everyone stood to attention
@@ -557,6 +620,11 @@ export function updateStaff(dt) {
             continue;
         }
         if (w.state === 'sickDone') { w.state = 'idle'; w.path = null; }
+
+        // Anyone owed a perk always has something to pick from. Levels earned inside grantSkillXp
+        // generate their own choices, but a save migrated from before careers existed arrives
+        // owed picks with none generated, which would show the player an empty chooser.
+        if (perksOwed(w) > 0 && !(w.perkChoices && w.perkChoices.length)) offerPerks(w);
 
         giveWay(w, dt);              // whoever needs this square least steps off it
 
@@ -640,7 +708,7 @@ export function updateStaff(dt) {
                 break;
             }
             case 'mopping': {
-                const rate = (nearCleanSupply(w) ? 1.4 : 1) * (1 + 0.22 * s.upgrades.clean);
+                const rate = (nearCleanSupply(w) ? 1.4 : 1) * (1 + 0.22 * s.upgrades.clean) * staffMods(w).mop;
                 w.tendTimer += dt * rate;
                 if (w.tendTimer >= 4) {
                     delete s.dirt[w.job.mopKey];
@@ -722,14 +790,25 @@ export function updateStaff(dt) {
                 // The worker who actually started the run gets skill credit for it. A leveled-up
                 // specialist runs this cap faster and a touch cleaner than a first-timer would.
                 if (entry) {
+                    // Learned skill at this cap, then who the person is on top of it: traits and
+                    // chosen perks multiply the same duration and quality the skill level does,
+                    // so the two stack rather than one overriding the other.
                     const lvl = skillLevel(w, entry.cap);
-                    if (lvl > 0) {
-                        entry.dur *= Math.max(0.3, 1 - SKILL_SPEED_PER_LEVEL * lvl);
-                        const qBonus = 1 + SKILL_QUALITY_PER_LEVEL * lvl;
+                    const mods = staffMods(w);
+                    const skillSpeed = lvl > 0 ? Math.max(0.3, 1 - SKILL_SPEED_PER_LEVEL * lvl) : 1;
+                    entry.dur *= skillSpeed * mods.speed;
+                    const qBonus = (lvl > 0 ? 1 + SKILL_QUALITY_PER_LEVEL * lvl : 1) * mods.quality;
+                    if (qBonus !== 1) {
                         for (const id of entry.sampleIds) {
                             const sm = s.samples.find(x => x.id === id);
-                            if (sm) sm.quality = Math.min(1, sm.quality * qBonus);
+                            if (sm) sm.quality = Math.max(0, Math.min(1, sm.quality * qBonus));
                         }
+                    }
+                    // A gentle operator is easier on the machine than a heavy-handed one. startRun
+                    // has already charged the standard wear, so this refunds or adds the balance.
+                    if (mods.wear !== 1 && e.condition != null) {
+                        const charged = WEAR_PER_RUN + WEAR_PER_EXTRA_BATCH_SAMPLE * (entry.sampleIds.length - 1);
+                        e.condition = Math.max(0, Math.min(100, e.condition + charged * (1 - mods.wear)));
                     }
                     grantSkillXp(w, entry.cap, entry.sampleIds.length);
                 }
@@ -866,7 +945,7 @@ function pickSampleJob(w) {
     // left out: they'd be a separate detour to the fridge, not something to bundle in here.
     // Among equally-eligible cart-mates (same proto + step, so the same run either way), the
     // most urgent ones still get first claim on the limited seats.
-    const capacity = cartCapacity();
+    const capacity = cartCapacity() + staffMods(w).carry;
     if (capacity > 1) {
         const cap = curStep(first).cap;
         const mates = s.samples.filter(sm => sm !== first && sm.state === 'queued' && !sm.claimedBy && !sm.storedAt

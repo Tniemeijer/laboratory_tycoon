@@ -1,7 +1,7 @@
 // ==================== CONTRACTS ====================
 
 import { PROTOCOLS, MAX_ACTIVE, OFFER_COUNT, ORGS, ADJ, SPOIL_PAYOUT_CUT, CANCEL_PENALTY_FACTOR, CANCEL_FEE_FACTOR } from '../data.js';
-import { G, nid, labLevel, repMult, dirtyUI } from '../core.js';
+import { G, nid, labLevel, repMult, dirtyUI} from '../core.js';
 
 function makeOffer() {
     const s = G.state, lv = labLevel();

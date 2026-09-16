@@ -1,9 +1,15 @@
 import LabScene from './threeScene.js';
 import * as GM from './game.js';
-import { G, init as initGame, tick, newGame, saveNow } from './game.js';
+import { G, init as initGame, tick, newGame, saveNow, hasSave } from './game.js';
 import { initUI, render as renderUI, sceneHandlers } from './ui/toolbar.js';
+import { initTitle, showTitle, showSummary, syncEndScreen } from './ui/title.js';
+import * as Inspector from './ui/inspector.js';
+import * as Menus from './ui/menus.js';
 
 function boot() {
+    // Whether there was something to come back to decides what the title screen offers. Read
+    // before init(), which replaces a missing save with a fresh state and would hide the answer.
+    const hadSave = hasSave();
     initGame();
 
     const scene = new LabScene(document.getElementById('canvas-container'));
@@ -12,9 +18,16 @@ function boot() {
 
     initUI();
 
+    // Nothing runs until the player has chosen. The lab renders behind the overlay either way, so
+    // the title sits over the actual save rather than a backdrop.
+    G.state.paused = true;
+    initTitle({ hadSave, onStart: () => { G.state.paused = false; } });
+    showTitle();
+
     scene.onFrame = (dt) => {
         tick(dt);
         renderUI(false);
+        syncEndScreen();
     };
 
     window.addEventListener('beforeunload', saveNow);
@@ -24,7 +37,7 @@ function boot() {
     window.lab = {
         get state() { return G.state; },
         get scene() { return G.scene; },
-        G, gm: GM, newGame
+        G, gm: GM, newGame, title: { showTitle, showSummary }, inspector: Inspector, menus: Menus
     };
 }
 

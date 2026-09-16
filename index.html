@@ -59,6 +59,9 @@
         <!-- Aggregated "what's blocking my active contracts" list. See ui/tasks.js. -->
         <div id="tasks" hidden></div>
 
+        <!-- Click a scientist to see who they are and what they're doing. See ui/inspector.js. -->
+        <div id="inspector" hidden></div>
+
         <div id="hint">Drag or WASD to move the view · Q/E (or ⟲⟳) to turn · scroll/pinch to zoom</div>
         <button id="rotate-pill" hidden>⟳ Rotate</button>
         <div id="cam-rotate">
@@ -66,6 +69,10 @@
             <button id="cam-rotate-right" aria-label="Rotate view right">⟳</button>
         </div>
         <div id="toast"></div>
+
+        <!-- Title screen and end-of-run summary, the same overlay in two states. See ui/title.js.
+             The lab keeps rendering behind it, paused. -->
+        <div id="title-screen" hidden></div>
     </div>
 
     <script type="module" src="/src/client/main.js"></script>

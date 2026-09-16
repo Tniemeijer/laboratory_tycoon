@@ -2,20 +2,19 @@
 // Owns the save file, the day/tick loop, and equipment placement. Gameplay systems live in
 // ./systems/*; this module wires them together and re-exports the public API the UI/scene use.
 
-import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, ROOM_DOOR_REQ, SUITED_ROOM_KINDS, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL } from './data.js';
+import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, ROOM_DOOR_REQ, SUITED_ROOM_KINDS, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, STAFF_TRAITS, STAFF_PERKS, CAREER_XP_PER_LEVEL, CAREER_MAX_LEVEL, CAREER_XP_PER_RUN, SKILL_XP_PER_RUN, RECEIVERSHIP_GRACE_DAYS, suppliesForStep, suppliesForCap} from './data.js';
 import {
     G, nid, resetIdCounter, currentIdCounter, dirtyUI, bumpNav, nav,
     labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt,
-    cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown
-} from './core.js';
+    cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown, sampleUtilisation, rollUtilisation, freshUtil, bottleneck, machineLoad, staffLoad, careerLevel, perksOwed, dailyWage, payrollTotal, staffMods} from './core.js';
 import { canPlace as gridCanPlace, tileToWorld, sealedRooms, wallFacing, footTiles } from './grid.js';
 import { refillOffers, acceptContract as acceptContractSys, failContract, cancelContract as cancelContractSys, cancelCost, checkContractArrivals } from './systems/contracts.js';
 import { spawnSample, abandonSample, updateSamples } from './systems/samples.js';
-import { updateStaff, hireStaff, toggleStaffCap, fireStaff } from './systems/staff.js';
+import { updateStaff, hireStaff, toggleStaffCap, fireStaff, choosePerk} from './systems/staff.js';
 import { buyUpgrade, buyZone, orderStock, driftPrices, deliverOrders, unitPrice, priceTrend, interestDue, nextInterestDay,
-         stockCapacity, stockUsed, stockFree, stockCount, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan } from './systems/economy.js';
+         stockCapacity, stockUsed, stockFree, stockCount, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan, checkSolvency, endRun} from './systems/economy.js';
 import { recomputeGrime } from './systems/dirt.js';
-import { updateEquipment, callMechanic, mechanicVisit, mechanicQuote } from './systems/equipment.js';
+import { updateEquipment, callMechanic, mechanicVisit, mechanicQuote, runShortage} from './systems/equipment.js';
 import { updateVisitors, clearVisitors, mechanicOnSite } from './systems/visitors.js';
 import { updateIncidents, dailyIncidents, evacuate, endEvacuation, callFireBrigade, callDisinfection,
          settleLawsuit, fightLawsuit, settlementOf, alarmReliability, isBurning, isQuarantined } from './systems/incidents.js';
@@ -25,19 +24,24 @@ const SAVE_KEY = 'labTycoonSave.v4';
 // Bumped whenever a change to the save's *meaning* needs a one-off conversion that can't be
 // detected by inspecting the data — currently: 5 = rooms are single tiles with a door you place
 // yourself, rather than 2×2 blocks that picked their own doorway.
-const SAVE_SCHEMA = 5;
+const SAVE_SCHEMA = 6;
 
 // ---------- re-exports (the public API used by ui.js / threeScene.js) ----------
 export {
     BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL,
+    suppliesForStep, suppliesForCap,
     WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, ROOM_DOOR_REQ,
     LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP, SUITED_ROOM_KINDS,
+    STAFF_TRAITS, STAFF_PERKS, CAREER_XP_PER_LEVEL, CAREER_MAX_LEVEL,
+    RECEIVERSHIP_GRACE_DAYS,
     G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt, nav,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown,
+    bottleneck, machineLoad, staffLoad,
+    careerLevel, perksOwed, dailyWage, payrollTotal, staffMods, choosePerk,
     hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, borrowLoan, repayLoan,
     orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
     interestDue, nextInterestDay, callMechanic, mechanicQuote, mechanicOnSite,
-    cancelCost,
+    cancelCost, checkSolvency, endRun, runShortage,
     evacuate, endEvacuation, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
     alarmReliability, isBurning, isQuarantined,
     DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS
@@ -89,7 +93,11 @@ function fresh() {
         lawsuits: [],
         visitors: [],               // people on site who aren't staff — see systems/visitors.js
         upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0 },
-        stats: { done: 0, failed: 0, cancelled: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0, fires: 0, outbreaks: 0, deaths: 0, shelved: 0 },
+        stats: { done: 0, failed: 0, cancelled: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0, fires: 0, outbreaks: 0, deaths: 0, shelved: 0,
+                 peakRep: 0, peakMoney: START_LOAN },
+        receivership: null,         // { since } once the bank has stepped in — see systems/economy.js
+        over: null,                 // { day, reason, summary } once the run has ended
+        util: freshUtil(),
         schema: SAVE_SCHEMA,
         tutorial: { step: 0, done: false },   // guided first run — see ui/tutorial.js
         navVersion: 0,
@@ -252,10 +260,12 @@ function advanceTime(dt) {
     s.dayFrac += dt / DAY_LENGTH;
     while (s.dayFrac >= 1) {
         s.dayFrac -= 1; s.day++;
+        rollUtilisation();          // the day just ended becomes what the Lab menu reports
         mechanicVisit();            // they work overnight and it's done by morning
         dailyIncidents();           // …and so do the disinfection crew, sick leave and the courts
         applyDailyUtilities();
         applyDailyInterest();
+        checkSolvency();            // ...and the bank's view of all that
         deliverOrders();
         driftPrices();
         checkContractArrivals(spawnSample);
@@ -271,9 +281,17 @@ function advanceTime(dt) {
 
 // ---------- save / load ----------
 function autoSave() {
+    // A run that has ended is not one to come back to. Leaving it on disk would offer "Continue"
+    // at the next boot and drop the player straight back onto their own obituary.
+    if (G.state && G.state.over) { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} return; }
     try { localStorage.setItem(SAVE_KEY, JSON.stringify({ state: G.state, idc: currentIdCounter() })); } catch (e) {}
 }
 export function saveNow() { autoSave(); }
+// Is there a run to come back to? Asked by the title screen before init() runs, since init()
+// silently substitutes a fresh state when there is no save and would erase the distinction.
+export function hasSave() {
+    try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; }
+}
 function loadSave() {
     try {
         const raw = localStorage.getItem(SAVE_KEY);
@@ -392,6 +410,7 @@ function loadSave() {
             // skip this equipment forever, since nothing would ever be left to clear it.
             e.operateClaim = null;
         }
+        if (!s.util) s.util = freshUtil();      // the day-load readout starts collecting fresh
         for (const w of s.staff) {
             w.job = null; w.carrying = null; w.reservedStation = null; w.path = null; w.state = 'idle';
             w.burnT = 0;
@@ -406,6 +425,16 @@ function loadSave() {
                 };
             }
             delete w.role;
+            // Scientists predating traits and careers. Everyone already on the payroll keeps the
+            // skills they earned, starts on no traits (rolling them now would silently rewrite
+            // people the player already knows) and begins their career from whatever the run
+            // credit they have already banked is worth.
+            if (!w.traits) w.traits = [];
+            if (!w.perks) w.perks = [];
+            if (w.xp == null) {
+                const banked = Object.values(w.skillXp || {}).reduce((n, v) => n + v, 0);
+                w.xp = Math.round(banked * (CAREER_XP_PER_RUN / SKILL_XP_PER_RUN));
+            }
             // Repairs are a call-out trade now, not something anyone on the payroll does.
             if (w.caps) delete w.caps.mechanic;
             if (w.name && w.name.startsWith('Dr. ')) w.name = w.name.slice(4);
@@ -442,6 +471,9 @@ export function newGame() {
 export function tick(dt) {
     dt = Math.min(dt, 0.1);
     const s = G.state;
+    // A finished run still renders -- the lab sits there behind the summary -- but nothing in it
+    // moves, so the numbers the player is reading cannot change under them.
+    if (s.over) { if (G.scene) G.scene.sync(s, dt); return; }
     if (!s.paused) {
         const g = dt * s.speed;
         advanceTime(g);
@@ -450,6 +482,7 @@ export function tick(dt) {
         updateEquipment(g);
         updateVisitors(g);
         updateIncidents(g);
+        sampleUtilisation(g);
     }
     if (G.scene) G.scene.sync(s, dt);
 }

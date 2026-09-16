@@ -5,9 +5,8 @@
 import {
     UPGRADES, ZONES, INGREDIENTS, SUPPLIES, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_MAX, LOAN_BORROW_STEP, LOAN_REPAY_STEP,
     PRICE_DRIFT, PRICE_PULL, PRICE_MIN, PRICE_MAX, ORDER_LEAD_DAYS, STOCK_TIER_CAPACITY,
-    CRATE_UNITS, WATER_ITEM
-} from '../data.js';
-import { G, nid, upgradeCost, utilityBreakdown, bumpNav, dirtyUI } from '../core.js';
+    CRATE_UNITS, WATER_ITEM, RECEIVERSHIP_DEBT, RECEIVERSHIP_GRACE_DAYS, RECEIVERSHIP_SALE_FACTOR, BUILD} from '../data.js';
+import { G, nid, upgradeCost, utilityBreakdown, bumpNav, dirtyUI} from '../core.js';
 import { queueTile, tileToWorld, annexLevel } from '../grid.js';
 
 export function buyUpgrade(k) {
@@ -144,8 +143,104 @@ export function applyDailyUtilities() {
     s.lastBill = bill.total;
     if (s.money < 0 && !s.warns['debt']) {
         s.warns['debt'] = 1;
-        G.onToast('Utility bills have pushed the lab into debt!', true);
+        G.onToast('Bills and wages have pushed the lab into debt!', true);
     }
+    // Peaks are recorded as the run goes rather than reconstructed at the end, which would only
+    // ever be able to report where you finished, not how well it once went.
+    s.stats.peakRep = Math.max(s.stats.peakRep || 0, s.reputation);
+    s.stats.peakMoney = Math.max(s.stats.peakMoney || 0, Math.round(s.money));
+}
+
+// ---------- receivership, and the end of a run ----------
+// Debt used to be survivable indefinitely: one warning, then interest arriving forever against a
+// balance nobody could pay. That is a fade, not a defeat. Past RECEIVERSHIP_DEBT the bank steps
+// in and starts selling the floor out from under you, one machine each morning, and you have
+// RECEIVERSHIP_GRACE_DAYS to get back above the line. Recovery is always possible right up to the
+// last day -- finish a contract, sell something yourself, borrow again -- which is what makes the
+// clock worth watching rather than a formality.
+export function checkSolvency() {
+    const s = G.state;
+    if (s.over) return;
+    if (s.receivership) {
+        if (s.money >= 0) {
+            s.receivership = null;
+            G.onToast('Out of receivership. The bank has withdrawn.');
+            dirtyUI();
+            return;
+        }
+        seizeAsset();
+        const daysIn = s.day - s.receivership.since;
+        if (daysIn >= RECEIVERSHIP_GRACE_DAYS) endRun('bankrupt');
+        else G.onToast(`In receivership: ${RECEIVERSHIP_GRACE_DAYS - daysIn} day${RECEIVERSHIP_GRACE_DAYS - daysIn === 1 ? '' : 's'} to clear the red`, true);
+        return;
+    }
+    if (s.money < RECEIVERSHIP_DEBT) {
+        s.receivership = { since: s.day };
+        // Anything outstanding is written off at once: a lab under administration is not taking on
+        // new work, and leaving live contracts to fail one by one would only bury the player
+        // deeper while they are trying to climb out.
+        for (const c of s.contracts.slice()) cancelContractSilently(c);
+        G.onToast('The bank has called in the loan. The lab is in receivership.', true);
+        dirtyUI();
+    }
+}
+// The bank takes the most valuable thing on the floor each morning, at forced-sale prices.
+function seizeAsset() {
+    const s = G.state;
+    const sellable = s.equipment.filter(e => BUILD[e.type].cost > 0);
+    if (!sellable.length) return;
+    sellable.sort((a, b) => BUILD[b.type].cost - BUILD[a.type].cost);
+    const e = sellable[0];
+    const got = Math.round(BUILD[e.type].cost * RECEIVERSHIP_SALE_FACTOR);
+    // Same tidy-up the player's own sale does: anything mid-run on it is abandoned and anybody
+    // walking to it is released, or they would head for a machine that no longer exists.
+    for (const p of (e.processing || []).slice())
+        for (const sid of (p.sampleIds || [p.sampleId])) { if (G.abandonSample) G.abandonSample(sid); }
+    for (const g of (e.staged || []).slice()) { if (G.abandonSample) G.abandonSample(g.sampleId); }
+    for (const w of s.staff)
+        if (w.job && (w.job.stationId === e.id || w.job.operateId === e.id || w.reservedStation === e.id))
+            G.releaseWorkerJob(w);
+    s.equipment = s.equipment.filter(x => x !== e);
+    s.money += got;
+    bumpNav();
+    G.onToast(`The bank sold your ${BUILD[e.type].name} (+$${got.toLocaleString()})`, true);
+    dirtyUI();
+}
+// Contracts are dropped without the usual reputation hit and break fee. The player is not walking
+// away here, the administrator is.
+function cancelContractSilently(c) {
+    const s = G.state;
+    c.state = 'cancelled';
+    s.contracts = s.contracts.filter(x => x !== c);
+    s.stats.cancelled++;
+    // filter() snapshots first: abandonSample splices the live array as it goes.
+    if (G.abandonSample) for (const sm of s.samples.filter(x => x.contractId === c.id)) G.abandonSample(sm.id);
+}
+
+// The run is over. The simulation stops dead and the summary is built from what was recorded
+// along the way, so nothing has to be recomputed from a state that is about to stop changing.
+export function endRun(reason) {
+    const s = G.state;
+    if (s.over) return;
+    s.paused = true;
+    try { localStorage.removeItem('labTycoonSave.v4'); } catch (e) {}
+    s.over = {
+        day: s.day, reason,
+        summary: {
+            days: s.day,
+            contractsDone: s.stats.done,
+            contractsFailed: s.stats.failed,
+            samples: s.stats.processed,
+            peakRep: Math.max(s.stats.peakRep || 0, s.reputation),
+            peakMoney: Math.max(s.stats.peakMoney || 0, Math.round(s.money)),
+            finalMoney: Math.round(s.money),
+            loan: s.loan,
+            staff: s.staff.length,
+            machines: s.equipment.length,
+            fires: s.stats.fires, outbreaks: s.stats.outbreaks, deaths: s.stats.deaths
+        }
+    };
+    dirtyUI();
 }
 
 // Servicing the debt: every few days the lender takes its interest in cash and the principal is

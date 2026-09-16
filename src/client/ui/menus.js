@@ -3,17 +3,19 @@
 // last-rendered menu was. Tool selection is injected from toolbar.js to avoid a cyclic import.
 
 import {
-    G, BUILD, PROTOCOLS, UPGRADES, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, CAP_LABEL,
+    G, BUILD, PROTOCOLS, UPGRADES, REAGENTS, INGREDIENTS, SUPPLIES, WATER_ITEM, ZONES, CAP_LABEL,
     orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
     orderBrew, BREW_QUEUE_MAX, REAGENT_BATCH, ROOM_DOOR_REQ,
     WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, LOAN_INTEREST_RATE, LOAN_MAX,
     SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP, LOAN_INTEREST_DAYS, LOAN_STEP,
+    STAFF_TRAITS, STAFF_PERKS, CAREER_XP_PER_LEVEL, CAREER_MAX_LEVEL,
     interestDue, nextInterestDay, mechanicQuote, mechanicOnSite, alarmReliability,
     labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps,
     cleanliness, ownedTileCount, utilityBreakdown, reagentCount,
+    bottleneck, machineLoad, staffLoad,
+    careerLevel, perksOwed, dailyWage, choosePerk,
     acceptContract, cancelContract, cancelCost, hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, toggleColdStore, callMechanic,
-    borrowLoan, repayLoan
-} from '../game.js';
+    borrowLoan, repayLoan, suppliesForStep} from '../game.js';
 import { sealedRooms } from '../grid.js';
 import { restartTutorial } from './tutorial.js';
 
@@ -57,11 +59,15 @@ const skillBadges = (w) => {
 // for, and the consumables the machines burn. Shown on the contract so you can see you're short
 // *before* taking the work on, instead of finding out when runs start coming out badly.
 const needsChain = (protoKey) => {
-    const reag = [], sup = new Set(['disposable']);
-    for (const st of PROTOCOLS[protoKey].steps) {
+    // Seeded from suppliesForStep() rather than assuming disposables: a step that handles no
+    // sample needs none, and hard-coding them here would list what a run never buys.
+    const reag = [], sup = new Set();
+    PROTOCOLS[protoKey].steps.forEach((st, i) => {
         if (st.reagent && !reag.includes(st.reagent)) reag.push(st.reagent);
-        if (SUPPLY_FOR_CAP[st.cap]) sup.add(SUPPLY_FOR_CAP[st.cap]);
-    }
+        // Asks the same function the simulation charges from, so the list can't drift out of step
+        // with what a run actually burns.
+        for (const k of suppliesForStep(protoKey, i)) sup.add(k);
+    });
     const bits = [];
     for (const k of reag) {
         const have = reagentCount(k) > 0;
@@ -126,12 +132,15 @@ export function contractTasks(protoKey) {
         todo(`Put ${need === 'Airlock' ? 'an' : 'a'} <b>${need}</b> in your <b>${rn}</b>. A sealed room grants nothing.`);
     }
     // Consumables and reagents: a run won't start without them at all.
-    const sup = new Set(['disposable']);
+    const sup = new Set();
     const reag = [];
-    for (const st of PROTOCOLS[protoKey].steps) {
-        if (SUPPLY_FOR_CAP[st.cap]) sup.add(SUPPLY_FOR_CAP[st.cap]);
+    // Read from the same function the simulation charges from. Building this list off the cap
+    // table instead missed slides entirely once they moved to the step that mounts the specimen,
+    // so a lab could run out of slides mid-prep and the task list would swear nothing was wrong.
+    PROTOCOLS[protoKey].steps.forEach((st, i) => {
+        for (const k of suppliesForStep(protoKey, i)) sup.add(k);
         if (st.reagent && !reag.includes(st.reagent)) reag.push(st.reagent);
-    }
+    });
     // Anything already bought is already handled: still on order, or sitting in a crate by the
     // door waiting to be shelved. Judging by shelf contents alone tells the player to re-order
     // what's already on its way.
@@ -295,15 +304,34 @@ export const BUILDERS = {
         h += `<button class="wide" data-hire ${s.staff.length >= maxStaff() || s.money < s.hireCost ? 'disabled' : ''}>Hire Scientist, $${s.hireCost}</button>`;
         h += `<div class="dd-sub">Cold storage <button class="tgl ${s.coldStore ? 'on' : ''}" data-coldstore>store perishables ${s.coldStore ? 'ON' : 'OFF'}</button></div>
               <div class="c-org">${coldUsed()}/${coldCapacity()} fridge/freezer shelves in use. When on, a free scientist will shelve a fading sample before it's needed, instead of leaving it to rot in the queue.</div>`;
+        const owed = s.staff.reduce((n, w) => n + perksOwed(w), 0);
+        if (owed) h += `<div class="c-org warnline">${owed} scientist${owed === 1 ? ' has' : 's have'} a new skill to pick.</div>`;
         h += `<div class="dd-sub">Scientists <span class="dim">tick what each one is allowed to do</span></div><div class="col">`;
         for (const w of s.staff) {
-            h += `<div class="staff">
-                <div class="s-top"><span>${w.name}${w.illUntil != null ? ' 🤒' : ''}</span><span class="dim">${w.illUntil != null ? `off sick until Day ${w.illUntil}` : labelState(w.state)}</span></div>
+            const lvl = careerLevel(w), pick = perksOwed(w) > 0;
+            const intoLevel = (w.xp || 0) % CAREER_XP_PER_LEVEL;
+            const pct = lvl >= CAREER_MAX_LEVEL ? 100 : Math.round(intoLevel / CAREER_XP_PER_LEVEL * 100);
+            h += `<div class="staff${pick ? ' pick' : ''}">
+                <div class="s-top"><span>${w.name} <b class="lvl">Lv${lvl}</b>${w.illUntil != null ? ' 🤒' : ''}</span><span class="dim">${w.illUntil != null ? `off sick until Day ${w.illUntil}` : labelState(w.state)}</span></div>
+                <div class="s-sub dim">$${dailyWage(w)}/day${lvl >= CAREER_MAX_LEVEL ? ' · fully qualified' : ` · ${pct}% to Lv${lvl + 1}`}</div>
+                ${lvl < CAREER_MAX_LEVEL ? `<span class="meter sm xp"><i class="good" style="width:${pct}%"></i></span>` : ''}
+                <div class="traits">${(w.traits || []).map(t => {
+                    const d = STAFF_TRAITS[t]; if (!d) return '';
+                    return `<span class="trait ${d.good ? 'tg' : 'tb'}" title="${d.desc}">${d.name}</span>`;
+                }).join('')}${(w.perks || []).map(k => {
+                    const d = STAFF_PERKS[k]; if (!d) return '';
+                    return `<span class="trait tp" title="${d.desc}">${d.name}</span>`;
+                }).join('')}</div>
                 <div class="roles">
                   ${STAFF_CAPS.map(c =>
                     `<button class="r cb ${w.caps[c] ? 'on' : ''}" data-cap="${w.id}:${c}">${w.caps[c] ? '☑' : '☐'} ${STAFF_CAP_LABEL[c]}</button>`).join('')}
                 </div>
                 ${skillBadges(w)}
+                ${pick ? `<div class="perkpick"><div class="pp-head">${w.name} has earned a skill. Choose one:</div>
+                    ${(w.perkChoices || []).map(k => {
+                        const d = STAFF_PERKS[k]; if (!d) return '';
+                        return `<button class="mini perk" data-perk="${w.id}:${k}"><b>${d.name}</b> ${d.desc}</button>`;
+                    }).join('')}</div>` : ''}
                 <button class="mini danger" data-fire="${w.id}">Fire</button>
             </div>`;
         }
@@ -430,6 +458,29 @@ export const BUILDERS = {
 
         // Includes the fire alarm: it's on the mechanic's list too, so leaving it out here made
         // the call-out quote below count a machine the player couldn't see anywhere.
+        // Where the day went. Sits above the equipment list because it answers the question the
+        // player actually has -- what to buy next -- and the wear list only answers what to fix.
+        const bn = bottleneck(), loads = machineLoad(), sl = staffLoad();
+        if (bn) {
+            const tone = bn.kind === 'ok' ? '' : ' warnline';
+            h += `<div class="dd-sub">Where the day went ${s.util && s.util.prev ? '<span class="dim">yesterday</span>' : '<span class="dim">so far today</span>'}</div>`;
+            h += `<div class="c-org${tone}">${bn.text}</div>`;
+            if (sl) {
+                const pc = (v) => Math.round(v * 100);
+                h += `<div class="loadbar" title="How the scientists' day divided up">
+                        <i class="l-work" style="width:${pc(sl.work)}%"></i><i class="l-walk" style="width:${pc(sl.walk)}%"></i><i class="l-spare" style="width:${pc(sl.spare)}%"></i>
+                      </div>
+                      <div class="c-org dim">Staff: ${pc(sl.work)}% working · ${pc(sl.walk)}% walking · ${pc(sl.spare)}% spare</div>`;
+            }
+            for (const m of loads.slice(0, 6)) {
+                const p = Math.round(m.busy * 100);
+                const cls = p > 85 ? 'bad' : p > 60 ? 'mid' : 'good';
+                h += `<div class="loadrow"><span class="ln">${m.name}</span>
+                        <span class="meter sm"><i class="${cls}" style="width:${p}%"></i></span>
+                        <span class="lp ${cls}">${p}%</span>${m.waiting ? `<span class="lq">${m.waiting} queued</span>` : ''}</div>`;
+            }
+        }
+
         const machines = s.equipment.filter(e => BUILD[e.type].cat === 'Processing' || BUILD[e.type].mount);
         const broken = machines.filter(e => e.broken);
         const worn = machines.filter(e => !e.broken && (e.condition ?? 100) < MECH_MAINT_THRESHOLD);
@@ -487,14 +538,16 @@ export const BUILDERS = {
         h += `<button class="mini" data-borrow ${s.loan >= LOAN_MAX ? 'disabled' : ''}>Borrow $${loanAmount.toLocaleString()}</button>`;
         h += `<button class="mini" data-repay ${canRepay <= 0 ? 'disabled' : ''}>Repay $${canRepay.toLocaleString()}</button>`;
 
-        h += `<div class="dd-sub">Utilities</div>
+        h += `<div class="dd-sub">Running costs</div>
               <div class="stats">
                 <span>⚡ Electricity<b>$${bill.electricity}/day</b></span>
                 <span>🔥 Heating<b>$${bill.heating}/day</b></span>
                 <span>💡 Lighting<b>$${bill.lighting}/day</b></span>
+                <span>👩‍🔬 Wages<b>$${bill.wages}/day</b></span>
                 <span>Owned tiles<b>${ownedTileCount()}</b></span>
+                <span>Scientists<b>${s.staff.length}</b></span>
               </div>
-              <div class="c-org">Total bill: $${bill.total}/day. Charged at midnight. Bigger labs and more machines cost more to run.</div>`;
+              <div class="c-org">Total bill: $${bill.total}/day. Charged at midnight. Bigger labs, more machines and more experienced staff all cost more to run.</div>`;
 
         h += `<div class="dd-sub">Records</div><div class="stats">
             <span>Contracts done<b>${st.done}</b></span>
@@ -521,9 +574,11 @@ export const BUILDERS = {
             ['Rooms', `Dark Room, Cleanroom and Containment Lab are floor you lay a tile at a time, over machines you already own. They upgrade whatever stands inside. Each needs a Door. An Airlock for the sealed ones, or it's inert.`],
             ['Stock', `Orders arrive next morning as crates at the door and must be carried to the stockroom. <b>A run will not start without the consumables it needs.</b> Extend the stockroom under Upgrades.`],
             ['Reagents', `Saline, Solvent and Buffer are brewed only when you order a batch in Stock, and they perish after a few days.`],
+            ['Your staff', `Every scientist is hired with innate traits, good and bad, that are theirs for good. Work earns them career levels, and each level lets you pick a skill for them in Staff. They draw a wage every day that rises with their level, so a veteran is better and dearer both.`],
             ['Wear', `Machines wear down, run slow, then break. Nobody on the payroll fixes them. Book a mechanic in Lab and they come the next morning.`],
             ['Accidents', `Neglected kit catches fire and spreads; a Fire Alarm evacuates and calls the brigade for you, if it's been serviced. Neglected kit in Containment breaches instead, sealing the room until a disinfection crew has been in.`],
-            ['Money', `You open on a loan. Interest is billed every ${LOAN_INTEREST_DAYS} days and utilities daily, whether you've earned anything or not.`]
+            ['Money', `You open on a loan. Interest is billed every ${LOAN_INTEREST_DAYS} days, and wages and utilities daily, whether you've earned anything or not.`],
+            ['Bottlenecks', `The Lab menu shows where the day actually went: how much of it each machine spent running, and how much of it your staff spent working, walking or spare. It names whatever is holding the lab up, so you know whether to buy a machine, hire someone, or move things closer together.`]
         ];
         h += `<div class="col">`;
         for (const [k, v] of rows) h += `<div class="reg"><span><b>${k}</b><br><span class="dim">${v}</span></span></div>`;
@@ -568,6 +623,11 @@ export function wireMenu(menu, dd) {
                 const w = G.state.staff.find(x => x.id === +el.dataset.fire);
                 if (w && confirm(`Fire ${w.name}?\n\nAnything they're carrying goes back in the queue, and hiring a replacement costs full price.`))
                     fireStaff(w.id);
+            }));
+        dd.querySelectorAll('[data-perk]').forEach(el =>
+            el.addEventListener('click', () => {
+                const [id, perk] = el.dataset.perk.split(':');
+                choosePerk(+id, perk);
             }));
         dd.querySelectorAll('[data-cap]').forEach(el =>
             el.addEventListener('click', () => {

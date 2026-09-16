@@ -15,7 +15,7 @@ const $ = (id) => document.getElementById(id);
 const STEPS = [
     {
         title: 'Welcome to the lab',
-        body: `You've got a room, a loan and no idea what you're doing. Let's get one job through the door. It takes about a minute.`
+        body: `Let's walk one job from the front door to the invoice, so you can see how the place fits together. About a minute, and you can skip it whenever you like.`
     },
     {
         title: 'Take a job',

@@ -27,7 +27,7 @@ const PROTO_COLOR = {
 // tray items sitting on the equipment itself (via appearanceForCap directly, since those already
 // carry their cap and don't need a sample lookup).
 function appearanceForCap(cap) {
-    if (cap === 'image' || cap === 'fluoresce') return 'slide';
+    if (cap === 'image' || cap === 'image_contain' || cap === 'fluoresce') return 'slide';
     if (cap === 'analyze') return 'report';
     return 'tube';
 }
@@ -77,6 +77,58 @@ const BREAK_WALL_H = 0.3;      // break room: low enough to see over. See _rebui
 // apart push rather than rotating it: rotating traded separation for sidestep and left them
 // overlapping longer, where adding keeps the full separating force and just angles the escape.
 // See _separatePeople().
+// ---------- work poses ----------
+// How a scientist stands while doing each job, in one table rather than scattered through sync().
+// Keyed by worker state, then by the machine they're at, because "attending" a microscope (hunched
+// at the eyepiece, barely moving) and attending an analysis desk (typing) look nothing alike.
+//
+//   arm   shoulder pitch in radians; negative swings the hands forward and up
+//   lean  forward tilt of the whole body
+//   amp   how far the arms travel on each repeat
+//   rate  roughly repeats per second
+//   alt   true = the arms move out of phase (typing, pipetting), false = together (stirring)
+//
+// Motion has to be big and slow here: the 3D pass renders at RES_SCALE, so anything subtle
+// vanishes into the pixel grid entirely.
+const WORK_POSES = {
+    tending: {
+        // Hands up on the stage and the head dipped, rather than the whole figure tipping over:
+        // the body is a rigid stack of boxes pivoting at the feet, so a big lean throws the head
+        // way out in front and reads as falling, not concentrating.
+        microscope:   { arm: -0.80, lean: 0.20, amp: 0.05, rate: 1.4, alt: false },
+        analysisdesk: { arm: -1.25, lean: 0.14, amp: 0.20, rate: 6.5, alt: true },
+        bench:        { arm: -1.00, lean: 0.20, amp: 0.32, rate: 3.0, alt: true },
+        flowhood:     { arm: -1.10, lean: 0.18, amp: 0.26, rate: 2.4, alt: true },
+        fumehood:     { arm: -1.10, lean: 0.18, amp: 0.26, rate: 2.4, alt: true },
+        default:      { arm: -0.90, lean: 0.16, amp: 0.22, rate: 2.8, alt: true }
+    },
+    operating: { default: { arm: -1.15, lean: 0.12, amp: 0.36, rate: 4.2, alt: true } },
+    atStation: { default: { arm: -1.05, lean: 0.14, amp: 0.10, rate: 1.8, alt: false } },
+    prepping:  { default: { arm: -0.95, lean: 0.14, amp: 0.48, rate: 4.6, alt: false } },
+    filling:   { default: { arm: -0.85, lean: 0.10, amp: 0.10, rate: 1.1, alt: false } },
+    storing:   { default: { arm: -1.25, lean: 0.18, amp: 0.30, rate: 2.0, alt: false } },
+    stocking:  { default: { arm: -1.00, lean: 0.22, amp: 0.42, rate: 1.8, alt: false } }
+};
+// Hands out in front, holding whatever they're carrying, instead of swinging empty.
+const CARRY_POSE = { arm: -1.15, lean: 0.04, amp: 0, rate: 0, alt: false };
+// Where the hands physically land in CARRY_POSE: the shoulder sits at y 0.68 and the hand 0.31
+// below it, so swinging the arm forward by CARRY_POSE.arm puts it here. Carried things are placed
+// at this point so they sit in the hands instead of near them.
+const CARRY_HAND = { y: 0.55, forward: 0.28 };
+const ARM_SWING = 0.42;          // how far the arms swing when walking empty-handed
+
+// Mopping: the arms, the handle and the torso all read from this one stroke, so the hands can
+// never drift off the handle they are supposed to be gripping.
+const MOP_RATE = 3.6;
+const MOP_POSE = { arm: -1.02, amp: 0.30, stagger: 0.16 };
+const mopStroke = (elapsed) => Math.sin(elapsed * MOP_RATE);
+
+function poseFor(state, machineType) {
+    const byState = WORK_POSES[state];
+    if (!byState) return null;
+    return byState[machineType] || byState.default;
+}
+
 const PASS_BIAS = 0.8;
 // How dark a machine gets at zero condition. Dull and grimy, still readable as itself.
 const SHADE_MIN = 0.5;
@@ -119,12 +171,23 @@ const SUIT_COLOR = 0xf0d878, SUIT_HOOD = 0xe8c84a;
 // Contractors, not staff — each trade its own unmistakable silhouette and palette, so you can
 // tell at a glance who has turned up without clicking anything.
 const VISITOR_COAT = 0xe07a2f, VISITOR_HAT = 0xe8ebed;          // mechanic: hi-vis, white hard hat
+// A plain upper limb for the side characters. They each used to be built with a single arm -- the
+// one holding their spanner or wand -- which read as a one-armed person from every angle that
+// showed their free side. This is the same shape the scientists' arms use: a box hanging from a
+// shoulder pivot, so setting rotation.x swings it forward.
+function limb(color, len = 0.22) {
+    const a = new THREE.Group();
+    const seg = box(0.09, len, 0.09, color);
+    seg.position.y = -len / 2;
+    a.add(seg);
+    return a;
+}
 // Contents chit on a delivery crate, so a stack of boxes is readable at a glance.
 const CRATE_TINT = {
     disposable: 0xcfd8dd, slide: 0x9fd6e6, fluorlabel: 0xd98ad0, column: 0x8fd48f, flowcell: 0xf0c040,
     salineSalt: 0xe8ebed, solventBase: 0xd88a5a, bufferMix: 0x8fb8e0
 };
-const FIRE_COAT = 0x2b3442, FIRE_BAND = 0xf5e14a, FIRE_HAT = 0xe8b21f;   // turnout kit, yellow helmet
+const FIRE_COAT = 0xc2a87a, FIRE_BAND = 0xffd633, FIRE_HAT = 0xf5c518;  // beige turnout, yellow bands and helmet
 const CLEAN_SUIT = 0xf2f6f4, CLEAN_TRIM = 0x4fae7a, CLEAN_VISOR = 0x2b3d4a;
 
 // dims of a footprint after rotation
@@ -676,13 +739,20 @@ class LabScene {
     }
     _pick() {
         this.raycaster.setFromCamera(this.pointer, this.camera);
-        const eq = [];
-        this.equipMeshes.forEach(m => eq.push(m));
-        const he = this.raycaster.intersectObjects(eq, true);
+        // People and machines are tested together and the nearest hit wins, rather than machines
+        // being checked first. A scientist standing at a bench is in front of it from most angles,
+        // and checking the bench first meant clicking the person always selected the furniture.
+        const solid = [];
+        this.equipMeshes.forEach(m => solid.push(m));
+        this.staffMeshes.forEach(m => solid.push(m));
+        this.visitorMeshes.forEach(m => solid.push(m));
+        const he = this.raycaster.intersectObjects(solid, true);
         if (he.length) {
             let o = he[0].object;
             while (o && !o.userData.kind) o = o.parent;
             if (o && o.userData.kind === 'equip') return { type: 'equip', id: o.userData.id };
+            if (o && o.userData.kind === 'staff') return { type: 'staff', id: o.userData.id };
+            if (o && o.userData.kind === 'visitor') return { type: 'visitor', id: o.userData.id };
         }
         const hf = this.raycaster.intersectObjects(this.floorTiles, false);
         if (hf.length) { const u = hf[0].object.userData; return { type: 'tile', tx: u.tx, tz: u.tz }; }
@@ -707,7 +777,11 @@ class LabScene {
             if (hit.type === 'equip') this.handlers.onEquipmentRightClick && this.handlers.onEquipmentRightClick(hit.id);
             return;
         }
+        // Hovering a person shouldn't leave a stale build ghost sitting under them.
+        if (hit.type === 'staff' || hit.type === 'visitor') this.hoverTile = null;
         if (hit.type === 'equip') this.handlers.onEquipmentClick && this.handlers.onEquipmentClick(hit.id);
+        else if (hit.type === 'staff') this.handlers.onStaffClick && this.handlers.onStaffClick(hit.id);
+        else if (hit.type === 'visitor') this.handlers.onVisitorClick && this.handlers.onVisitorClick(hit.id);
         else this.handlers.onTileClick && this.handlers.onTileClick(hit.tx, hit.tz);
     }
 
@@ -1348,12 +1422,14 @@ class LabScene {
             // little paper label stuck on one end.
             const glass = box(0.34, 0.02, 0.14, 0xcfe3ea, { transparent: true, opacity: 0.8 });
             glass.position.y = 0.09; g.add(glass);
+            g.userData.holdY = 0.1;
             const smear = box(0.12, 0.022, 0.08, c); smear.position.set(-0.05, 0.101, 0); g.add(smear);
             const label = box(0.09, 0.021, 0.13, 0xf4ede0); label.position.set(0.12, 0.1, 0); g.add(label);
         } else if (appearance === 'report') {
             // A written-up report on a clipboard, on its way to be analyzed at a desk. Flat
             // paper with a couple of ruled lines and a proto-colored result stamp.
             const board = box(0.28, 0.02, 0.36, 0x8a6a4a); board.position.y = 0.08; g.add(board);
+            g.userData.holdY = 0.09;
             const paper = box(0.24, 0.015, 0.3, 0xf4ede0); paper.position.y = 0.095; g.add(paper);
             const line1 = box(0.16, 0.016, 0.018, 0x9a9184); line1.position.set(0, 0.1, -0.08); g.add(line1);
             const line2 = box(0.16, 0.016, 0.018, 0x9a9184); line2.position.set(0, 0.1, -0.03); g.add(line2);
@@ -1361,7 +1437,19 @@ class LabScene {
         } else {
             const tube = box(0.22, 0.34, 0.22, c); tube.position.y = 0.17; g.add(tube);
             const cap = box(0.26, 0.08, 0.26, 0xffffff); cap.position.y = 0.37; g.add(cap);
+            g.userData.holdY = 0.2;
         }
+        // Every appearance is modelled standing on the floor, so the group's origin is at the
+        // bottom of it. holdY is the height of its middle above that origin: subtract it and a
+        // carried one sits *in* the hand instead of balanced on top of it. baseY is where the
+        // first part rests when the thing is loose on the floor, which used to be hard-coded to a
+        // tube's 0.17 and so floated flat slides and clipboards.
+        // Every part's resting height, not just the first one's. The idle bob used to move
+        // children[0] alone, which is only the whole object when the object is one box: a tube
+        // rose and fell while its white cap hung still above it, a clipboard's board floated off
+        // the page and lines printed on it, and a slide's glass drifted out from under its smear
+        // and label. Bobbing all the parts off their own bases keeps each thing in one piece.
+        g.userData.partBaseY = g.children.map(c => c.position.y);
     }
 
     _buildStaff(s) {
@@ -1369,25 +1457,51 @@ class LabScene {
         g.userData = { kind: 'staff', id: s.id, facing: 0, mopping: false };
         const body = new THREE.Group();
         const skinCol = s.skin ?? 0xf0c9a4, hairCol = s.hairColor ?? 0x3b2a1d;
+        // Everything above the waist hangs off `torso`, which pivots at WAIST_Y. Leaning used to
+        // rotate the whole body group, and the body pivots at the feet — so a rigid stack of
+        // boxes tipped from the ankles and read as falling over rather than bending to look at
+        // something. People bend at the waist; now so do these.
+        const WAIST_Y = 0.34;
+        const torso = new THREE.Group();
+        torso.position.y = WAIST_Y;
         const legs = box(0.26, 0.3, 0.2, 0x394a63); legs.position.y = 0.15;
-        const coat = box(0.34, 0.42, 0.24, COAT_COLOR); coat.position.y = 0.52;
-        const head = box(0.22, 0.22, 0.22, skinCol); head.position.y = 0.85;
-        const hair = box(0.24, 0.08, 0.24, hairCol); hair.position.y = 0.97;
-        body.add(legs, coat, head, hair);
+        const coat = box(0.34, 0.42, 0.24, COAT_COLOR); coat.position.y = 0.52 - WAIST_Y;
+        const head = box(0.22, 0.22, 0.22, skinCol); head.position.y = 0.85 - WAIST_Y;
+        const hair = box(0.24, 0.08, 0.24, hairCol); hair.position.y = 0.97 - WAIST_Y;
+        body.add(legs, torso);
+        torso.add(coat, head, hair);
         // The hood only appears while suited; the coat and legs just change colour, so a gowned
         // worker still reads as the same person underneath.
-        const hood = box(0.26, 0.26, 0.26, SUIT_HOOD); hood.position.y = 0.86; hood.visible = false;
+        const hood = box(0.26, 0.26, 0.26, SUIT_HOOD); hood.position.y = 0.86 - WAIST_Y; hood.visible = false;
         const visor = box(0.16, 0.09, 0.03, 0x2b3d4a, { transparent: true, opacity: 0.85 });
-        visor.position.set(0, 0.87, 0.14); visor.visible = false;
-        body.add(hood, visor);
+        visor.position.set(0, 0.87 - WAIST_Y, 0.14); visor.visible = false;
+        torso.add(hood, visor);
+        g.userData.torso = torso;
+        // Arms. The scientists had none, which is the real reason they read as inert while every
+        // contractor looks busy: with no hands, "doing something" could only ever be shown by the
+        // machine or by a prop floating nearby. Each arm is a group pivoting at the shoulder, so
+        // one rotation.x per side drives walking, carrying and every work pose below.
+        const arms = { l: new THREE.Group(), r: new THREE.Group() };
+        const armParts = [];
+        for (const side of ['l', 'r']) {
+            const sx = side === 'l' ? 1 : -1;
+            const upper = box(0.09, 0.28, 0.1, COAT_COLOR); upper.position.y = -0.14;
+            const hand = box(0.09, 0.08, 0.09, skinCol); hand.position.y = -0.31;
+            arms[side].add(upper, hand);
+            arms[side].position.set(sx * 0.21, 0.68 - WAIST_Y, 0);
+            torso.add(arms[side]);
+            armParts.push(upper);
+        }
+        g.userData.arms = arms;
+        g.userData.armSleeves = armParts;      // recoloured with the coat when gowning up
         g.userData.coat = coat; g.userData.legs = legs; g.userData.hood = hood; g.userData.visor = visor;
         g.userData.suited = false;
         if (s.hairLong) {
             // Hangs down the back of the head rather than just capping it, same hair color,
             // assigned once at hiring alongside the short/long choice so it doesn't change look
             // from one render to the next.
-            const hairBack = box(0.2, 0.26, 0.1, hairCol); hairBack.position.set(0, 0.78, -0.15);
-            body.add(hairBack);
+            const hairBack = box(0.2, 0.26, 0.1, hairCol); hairBack.position.set(0, 0.78 - WAIST_Y, -0.15);
+            torso.add(hairBack);
         }
 
         // Held mop, hidden except while actively mopping (animated in the render loop below) —
@@ -1473,7 +1587,12 @@ class LabScene {
         kit.position.set(-0.24, 0.3, 0);
         body.add(kit);
 
-        g.userData.body = body; g.userData.arm = arm; g.userData.kit = kit;
+        // The free hand, on the toolbox side, so it reads as carrying the box on the walk in.
+        const offArm = limb(VISITOR_COAT);
+        offArm.position.set(-0.2, 0.66, 0);
+        body.add(offArm);
+
+        g.userData.body = body; g.userData.arm = arm; g.userData.kit = kit; g.userData.offArm = offArm;
         g.add(body);
         return g;
     }
@@ -1512,7 +1631,15 @@ class LabScene {
         arm.position.set(0, 0.66, 0.16);
         body.add(arm);
 
+        // Two actual arms reaching from the shoulders to the grip. The branch group above is only
+        // the hardware; without these the figure was a coat with a hose floating across its chest.
+        const armL = limb(FIRE_COAT), armR = limb(FIRE_COAT);
+        armL.position.set(-0.19, 0.68, 0); armR.position.set(0.19, 0.68, 0);
+        armL.rotation.z = 0.22; armR.rotation.z = -0.22;    // elbows in toward the branch
+        body.add(armL, armR);
+
         g.userData.body = body; g.userData.arm = arm; g.userData.jet = jet;
+        g.userData.gripArms = [armL, armR];
         g.add(body);
         return g;
     }
@@ -1545,9 +1672,57 @@ class LabScene {
         arm.position.set(0.16, 0.66, 0.1);
         body.add(arm);
 
+        const offArm = limb(CLEAN_SUIT);
+        offArm.position.set(-0.18, 0.66, 0);
+        body.add(offArm);
+
         g.userData.body = body; g.userData.arm = arm; g.userData.jet = fog;
+        g.userData.offArm = offArm;
         g.add(body);
         return g;
+    }
+
+    // Puts a scientist into whatever attitude their current job calls for: arms, forward lean and
+    // a repeating motion. Three cases, in priority order — mopping owns the whole body and is
+    // handled separately, someone carrying something holds it in front of them, and otherwise the
+    // pose table decides. Falling through all three means walking or standing, which gets an arm
+    // swing or nothing at all.
+    _poseStaff(mesh, moving) {
+        const arms = mesh.userData.arms;
+        if (!arms || !mesh.userData.torso) return;
+        if (mesh.userData.mopping) {
+            // Both hands stay on the handle, so the arms ride the same stroke the mop does:
+            // reaching out on the push, drawn back in on the pull. One hand grips higher up the
+            // shaft than the other, the way anybody actually holds a mop. The torso and the mop
+            // itself are the mop animation's to drive, so this only sets the arms.
+            const stroke = mopStroke(this.elapsed);
+            const grip = MOP_POSE.arm - stroke * MOP_POSE.amp;
+            arms.l.rotation.x = grip - MOP_POSE.stagger;
+            arms.r.rotation.x = grip + MOP_POSE.stagger;
+            return;
+        }
+        const pose = mesh.userData.pose;
+        const t = this.elapsed;
+        let l = 0, r = 0, lean = 0;
+        if (pose) {
+            const phase = Math.sin(t * pose.rate);
+            // `alt` runs the arms half a cycle apart so it reads as two hands working rather than
+            // one gesture mirrored — the difference between typing and a bow.
+            const phase2 = pose.alt ? Math.sin(t * pose.rate + Math.PI) : phase;
+            l = pose.arm + phase * pose.amp;
+            r = pose.arm + phase2 * pose.amp;
+            lean = pose.lean;
+        } else if (mesh.userData.carrying) {
+            l = r = CARRY_POSE.arm;
+            lean = CARRY_POSE.lean;
+        } else if (moving) {
+            // Opposite arms on each step, in time with the existing walk bob.
+            const swing = Math.sin(t * 10) * ARM_SWING;
+            l = swing; r = -swing;
+        }
+        arms.l.rotation.x = l;
+        arms.r.rotation.x = r;
+        mesh.userData.torso.rotation.x = lean;
     }
 
     // ---------- reconcile ----------
@@ -1685,12 +1860,18 @@ class LabScene {
                 // below the first tube's top, so they clipped straight through each other; spread
                 // them along a row perpendicular to the carry direction instead, all level, so a
                 // full cart reads as several distinct tubes rather than one glowing blob.
+                // The offsets below are applied in the step pass against the carrier's *rendered*
+                // position rather than here against the simulated one. The staff mesh lerps along
+                // behind the simulation, so building a world position out of s.wx/s.wz left every
+                // carried tube floating out in front of the hands by exactly that lag the whole
+                // time anybody was walking, and further ahead the faster the game ran.
                 const carrier = state.staff.find(w => Array.isArray(w.carrying) && w.carrying.includes(s.id));
                 const carrierMesh = carrier && this.staffMeshes.get(carrier.id);
                 const facing = carrierMesh ? carrierMesh.userData.facing : 0;
                 const idx = carrier ? carrier.carrying.indexOf(s.id) : 0;
                 const n = carrier ? carrier.carrying.length : 1;
                 mesh.userData.facing = facing;
+                mesh.userData.carrier = carrier ? { id: carrier.id, idx, n } : null;
                 const hx = Math.cos(facing) * 0.21, hz = -Math.sin(facing) * 0.21;
                 // Each tube is 0.22 wide. Spacing needs to clear that even in the worst-case
                 // orientation (the row axis running diagonally across a tube's square footprint,
@@ -1700,6 +1881,7 @@ class LabScene {
                 const spread = idx - (n - 1) / 2;
                 mesh.userData.target = { x: s.wx + hx + rx * spread, y: 0.56, z: s.wz + hz + rz * spread };
             } else {
+                mesh.userData.carrier = null;
                 mesh.userData.target = { x: s.wx, y: 0.14, z: s.wz };
             }
         });
@@ -1750,10 +1932,32 @@ class LabScene {
                 mesh.userData.suited = suited;
                 mesh.userData.coat.material.color.setHex(suited ? SUIT_COLOR : COAT_COLOR);
                 mesh.userData.legs.material.color.setHex(suited ? SUIT_COLOR : 0x394a63);
+                for (const sl of mesh.userData.armSleeves || []) sl.material.color.setHex(suited ? SUIT_COLOR : COAT_COLOR);
                 mesh.userData.hood.visible = suited;
                 mesh.userData.visor.visible = suited;
             }
             mesh.userData.mopping = s.state === 'mopping';
+            // Which machine are they at? The pose depends on it: hunched at a microscope, typing
+            // at a desk. Resolved here, where the worker record is to hand, rather than in the
+            // animation loop.
+            const jobId = s.job ? (s.job.operateId ?? s.job.stationId) : null;
+            const atMachine = jobId != null ? state.equipment.find(e => e.id === jobId) : null;
+            mesh.userData.pose = poseFor(s.state, atMachine ? atMachine.type : null);
+            // What they should be looking at while stationary. Facing used to update only while
+            // walking, so a worker kept whichever way their last step left them pointing — often
+            // side-on to the machine, or with their back to it, reaching into thin air. The pose
+            // work made that obvious because there are now arms to point the wrong way.
+            if (atMachine) {
+                const c = equipCenterWorld(atMachine.type, atMachine.tx, atMachine.tz, atMachine.rot);
+                mesh.userData.faceTarget = { x: c.x, z: c.z };
+            } else if (s.state === 'mopping' && s.job && s.job.mopKey) {
+                const [mx, mz] = s.job.mopKey.split(',').map(Number);
+                const w = tileToWorld(mx, mz);
+                mesh.userData.faceTarget = { x: w.x, z: w.z };
+            } else {
+                mesh.userData.faceTarget = null;
+            }
+            mesh.userData.carrying = !!((s.carrying && s.carrying.length) || s.carryingCrate);
             const idling = s.state === 'idle' || s.state === 'resting';
             const cm = this.coffeeMachine.position;
             mesh.userData.chatterEligible = idling && Math.hypot(s.wx - cm.x, s.wz - cm.z) < 2.0;
@@ -1770,8 +1974,10 @@ class LabScene {
                 const cm = this.staffMeshes.get(carrier.id);
                 const facing = cm ? cm.userData.facing : 0;
                 mesh.userData.facing = facing;
-                mesh.userData.target = { x: c.wx + Math.cos(facing) * 0.26, y: 0.42, z: c.wz - Math.sin(facing) * 0.26 };
+                mesh.userData.carrier = carrier.id;          // positioned off the rendered carrier
+                mesh.userData.target = { x: c.wx + Math.cos(facing) * 0.26, y: 0.46, z: c.wz - Math.sin(facing) * 0.26 };
             } else {
+                mesh.userData.carrier = null;
                 mesh.userData.target = { x: c.wx, y: 0, z: c.wz };
             }
         });
@@ -1854,22 +2060,41 @@ class LabScene {
             });
         });
         this.sampleMeshes.forEach((mesh, id) => {
-            step(mesh);
+            if (!mesh.userData.carrier) step(mesh);   // a carried one is placed in _attachCarried()
             if (mesh.userData.carried) {
                 // Held rigidly rather than idly spinning/bobbing. It's in a hand, not sitting
                 // on a rack.
                 mesh.rotation.y = mesh.userData.facing || 0;
-                mesh.children[0].position.y = 0.17;
+                this._bobSample(mesh, 0);
             } else {
                 mesh.rotation.y += dt * 1.5;
-                mesh.children[0].position.y = 0.17 + Math.sin(this.elapsed * 4 + id) * 0.03;
+                this._bobSample(mesh, Math.sin(this.elapsed * 4 + id) * 0.03);
             }
         });
         this.staffMeshes.forEach((mesh) => {
-            const d = step(mesh);
-            const moving = d && (Math.abs(d.dx) + Math.abs(d.dz)) > 0.003;
-            if (moving) {
-                const want = Math.atan2(d.dx, d.dz);
+            step(mesh);
+            // "Moving" has to mean the simulation walked them somewhere, not merely that the mesh
+            // is off its mark. _separatePeople() shoves meshes off target every frame, so the old
+            // test (mesh far from target) read as walking for anyone standing near somebody else:
+            // each one faced their own target, which is back through the person who displaced
+            // them. Two people settling at arm's length would therefore turn and face each other
+            // and hold it, which is the stand-off. The target's own frame-to-frame movement is the
+            // honest walk, and its direction is the way they're actually going.
+            const t = mesh.userData.target;
+            const prev = mesh.userData.prevTarget;
+            const wx = t && prev ? t.x - prev.x : 0, wz = t && prev ? t.z - prev.z : 0;
+            const moving = Math.abs(wx) + Math.abs(wz) > 0.001;
+            if (t) mesh.userData.prevTarget = { x: t.x, z: t.z };
+            // Walking: face the way you're going. Stopped at a machine (or over a spill): turn to
+            // face it. Otherwise keep whatever you were last pointing at.
+            let want = null;
+            if (moving) want = Math.atan2(wx, wz);
+            else if (mesh.userData.faceTarget) {
+                const fx = mesh.userData.faceTarget.x - mesh.position.x;
+                const fz = mesh.userData.faceTarget.z - mesh.position.z;
+                if (Math.abs(fx) + Math.abs(fz) > 0.05) want = Math.atan2(fx, fz);
+            }
+            if (want !== null) {
                 let diff = want - mesh.userData.facing;
                 while (diff > Math.PI) diff -= Math.PI * 2;
                 while (diff < -Math.PI) diff += Math.PI * 2;
@@ -1878,6 +2103,7 @@ class LabScene {
             }
             mesh.userData.moving = moving;
             mesh.userData.body.position.y = moving ? Math.abs(Math.sin(this.elapsed * 10)) * 0.06 : 0;
+            this._poseStaff(mesh, moving);
             const mop = mesh.userData.mop;
             mop.visible = mesh.userData.mopping;
             if (mesh.userData.mopping) {
@@ -1886,7 +2112,7 @@ class LabScene {
                 // Now the head travels across the floor, the handle rakes with it, the head
                 // squashes on the forward press, and the body leans into the stroke and rocks —
                 // the motion reads as somebody working rather than a prop being waggled.
-                const t = this.elapsed * 3.6;
+                const t = this.elapsed * MOP_RATE;
                 const stroke = Math.sin(t);                     // -1 drawn back, +1 pushed out
                 const press = Math.max(0, stroke);              // weight only goes on the push
                 const rest = mop.userData.rest;
@@ -1902,18 +2128,18 @@ class LabScene {
                 if (head) { head.scale.set(1 + press * 0.25, 1 - press * 0.3, 1); }
                 // The body follows the mop: leans out on the push, straightens on the pull, with
                 // a little sway so the two strokes don't look identical.
-                const bd = mesh.userData.body;
+                const bd = mesh.userData.torso;
                 bd.rotation.x = stroke * 0.13;
                 bd.rotation.z = Math.sin(t * 0.5) * 0.05;
-                bd.position.y = press * 0.02;
-            } else if (mesh.userData.body.rotation.x || mesh.userData.body.rotation.z) {
-                mesh.userData.body.rotation.x = 0;
-                mesh.userData.body.rotation.z = 0;
+                mesh.userData.body.position.y = press * 0.02;
+            } else if (mesh.userData.torso && mesh.userData.torso.rotation.z) {
+                // Only the sway is the mop's to clear; the forward lean belongs to _poseStaff().
+                mesh.userData.torso.rotation.z = 0;
             }
             this._updateChatter(mesh);
         });
         this.crateMeshes.forEach((mesh) => {
-            step(mesh);
+            if (mesh.userData.carrier == null) step(mesh);
             mesh.rotation.y = mesh.userData.carried ? (mesh.userData.facing || 0) : 0;
         });
         this.visitorMeshes.forEach((mesh) => {
@@ -1930,6 +2156,10 @@ class LabScene {
             mesh.userData.moving = moving;
             mesh.userData.body.position.y = moving ? Math.abs(Math.sin(this.elapsed * 9)) * 0.06 : 0;
             const working = mesh.userData.working;
+            // The free arm swings on the walk and hangs still once they're working, so the side
+            // characters move like the scientists do rather than holding one pose.
+            if (mesh.userData.offArm)
+                mesh.userData.offArm.rotation.x = (moving && !working) ? Math.sin(this.elapsed * 9) * ARM_SWING : 0;
             if (mesh.userData.kit) {
                 // Mechanic: spanner up and turning while they work, arm at their side while they
                 // walk, and the toolbox set down on the floor rather than carried.
@@ -1942,6 +2172,13 @@ class LabScene {
                 mesh.userData.jet.visible = working;
                 mesh.userData.arm.rotation.y = working ? Math.sin(this.elapsed * 1.8) * 0.45 : 0;
                 mesh.userData.arm.rotation.x = working ? -0.1 : 0.35;
+                // The fire crew's arms follow the branch: out in front while they're playing water
+                // on something, dropped toward their side once it's out.
+                if (mesh.userData.gripArms) {
+                    const reach = working ? -1.15 : -0.55;
+                    const sweep = working ? Math.sin(this.elapsed * 1.8) * 0.45 : 0;
+                    for (const ga of mesh.userData.gripArms) { ga.rotation.x = reach; ga.rotation.y = sweep; }
+                }
                 if (working) {
                     const k = 0.9 + Math.sin(this.elapsed * 9) * 0.12;
                     mesh.userData.jet.scale.set(k, k, 1);
@@ -1949,6 +2186,7 @@ class LabScene {
             }
         });
         this._separatePeople();
+        this._attachCarried();
         this._syncSpeechBubbles();
         this._syncProgressBars();
 
@@ -2050,6 +2288,63 @@ class LabScene {
     // alike. The pathfinder reasons in whole tiles and has no notion of two people wanting the
     // same one, so without this a mechanic walking the aisle passes straight through a scientist
     // stood at a bench.
+    // Puts whatever a worker is carrying into their hands, every frame, from the carrier mesh's
+    // own rendered position and facing.
+    //
+    // This has to happen here, last, for two reasons. The staff mesh lerps along behind the
+    // simulated position, so a world position built out of the simulation (which is what the
+    // reconcile pass has) sat out in front of the hands by exactly that lag whenever anybody
+    // walked, and drifted further the faster the game ran. And _separatePeople() shoves workers
+    // sideways after they've been stepped, so anything placed before it gets left behind by a
+    // nudged carrier.
+    _attachCarried() {
+        this.sampleMeshes.forEach((mesh) => {
+            const car = mesh.userData.carrier;
+            const cm = car && this.staffMeshes.get(car.id);
+            if (!cm) return;
+            const facing = cm.userData.facing || 0;
+            mesh.userData.facing = facing;
+            mesh.rotation.y = facing;
+            // The mesh is turned with rotation.y = facing, so its forward axis in world space is
+            // (sin, cos) -- the same convention facing is derived from, atan2(dx, dz). This used
+            // to read (cos, -sin), which is that rotated by ninety degrees, so the tube was pushed
+            // out past the carrier's shoulder instead of forward into their hands.
+            const hx = Math.sin(facing) * CARRY_HAND.forward, hz = Math.cos(facing) * CARRY_HAND.forward;
+            // A Sample Cart trip carries several at once. Spread them along a row across the
+            // carry direction, all level: stacking by height alone put one tube's midpoint below
+            // the one under it, so they clipped through each other. 0.32 clears a 0.22-wide tube
+            // even when the row runs diagonally across its square footprint.
+            const rowAngle = facing + Math.PI / 2;
+            const rx = Math.sin(rowAngle) * 0.32, rz = Math.cos(rowAngle) * 0.32;
+            const spread = car.idx - (car.n - 1) / 2;
+            // The carrier's walk bob lives on their body group, so ride that too or the tube
+            // hangs still while the person holding it bounces.
+            const bob = cm.userData.body ? cm.userData.body.position.y : 0;
+            mesh.position.set(cm.position.x + hx + rx * spread,
+                              CARRY_HAND.y - (mesh.userData.holdY || 0) + bob,
+                              cm.position.z + hz + rz * spread);
+        });
+        this.crateMeshes.forEach((mesh) => {
+            const id = mesh.userData.carrier;
+            const cm = id != null && this.staffMeshes.get(id);
+            if (!cm) return;
+            const facing = cm.userData.facing || 0;
+            mesh.userData.facing = facing;
+            mesh.rotation.y = facing;
+            const bob = cm.userData.body ? cm.userData.body.position.y : 0;
+            mesh.position.set(cm.position.x + Math.sin(facing) * 0.3, 0.46 + bob,
+                              cm.position.z + Math.cos(facing) * 0.3);
+        });
+    }
+
+    // Lifts every part of a loose sample by the same amount, so it bobs as one object.
+    _bobSample(mesh, offset) {
+        const bases = mesh.userData.partBaseY;
+        if (!bases) return;
+        for (let i = 0; i < mesh.children.length && i < bases.length; i++)
+            mesh.children[i].position.y = bases[i] + offset;
+    }
+
     _separatePeople() {
         const meshes = [...this.staffMeshes.values(), ...this.visitorMeshes.values()];
         const MIN_DIST = 0.46, PUSH = 0.5;

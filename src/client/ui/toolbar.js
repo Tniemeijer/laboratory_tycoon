@@ -7,10 +7,10 @@ import {
     canPlace, canAfford, isUnlocked, placeEquipment, rotateEquipment, moveEquipment, demolish,
     togglePause, setSpeed, newGame,
     evacuate, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
-    DISINFECT_FEE, FIRE_BRIGADE_FEE
-} from '../game.js';
+    DISINFECT_FEE, FIRE_BRIGADE_FEE, RECEIVERSHIP_GRACE_DAYS} from '../game.js';
 import { BUILDERS, wireMenu, setToolHandler } from './menus.js';
 import { renderTutorial } from './tutorial.js';
+import { selectStaff, clearSelection, render as renderInspector } from './inspector.js';
 import { renderTasks } from './tasks.js';
 
 const $ = (id) => document.getElementById(id);
@@ -180,6 +180,7 @@ function refreshGhost() {
 export const sceneHandlers = {
     onTileHover() { refreshGhost(); },
     onTileClick(tx, tz) {
+        clearSelection();            // clicking the floor puts the inspector away
         if (G.tool === 'move') {
             if (moveId != null) {
                 // keep the tool live after a drop, so several machines can be shuffled in a row
@@ -213,6 +214,18 @@ export const sceneHandlers = {
         if (!room) return;
         if (G.tool === 'demolish') demolish(room.id);
         else G.onToast(`${BUILD[room.type].name}, ${BUILD[room.type].desc.split('.')[0]}.`);
+    },
+    onStaffClick(id) {
+        // Only when you're not mid-build: with a tool in hand a click is a placement, and the tool
+        // should win rather than a panel opening under the cursor.
+        if (G.tool) return;
+        selectStaff(id);
+    },
+    onVisitorClick(id) {
+        const v = (G.state.visitors || []).find(x => x.id === id);
+        if (!v) return;
+        const who = v.kind === 'firefighter' ? 'Fire crew' : v.kind === 'cleaner' ? 'Disinfection crew' : 'Mechanic';
+        G.onToast(`${who}, ${v.working ? 'working' : 'on their way'}`);
     },
     onEquipmentClick(id) {
         if (G.tool === 'move') {
@@ -296,6 +309,7 @@ export function render(force) {
     renderAlerts(s);
     renderTasks();
     renderTutorial();
+    renderInspector();          // every frame: what they're doing changes while you watch
 
     if (force || s.uiRev !== lastRev) {
         lastRev = s.uiRev;
@@ -316,6 +330,16 @@ function renderAlerts(s) {
     const bottom = Math.round($('bar').getBoundingClientRect().bottom + 6);
     if (bottom !== lastBarBottom) { lastBarBottom = bottom; el.style.top = bottom + 'px'; }
     const items = [];
+
+    // The bank taking the lab apart is the most urgent thing that can be happening, so it sits
+    // above the fires. It needs a running count of the days left or the player has no way to know
+    // how much rope is left.
+    if (s.receivership && !s.over) {
+        const left = Math.max(0, RECEIVERSHIP_GRACE_DAYS - (s.day - s.receivership.since));
+        items.push(`<div class="alert bad"><b>RECEIVERSHIP</b>. The bank has called in the loan and is
+            selling a machine every morning. <b>${left} day${left === 1 ? '' : 's'}</b> to get back above zero,
+            or the lab is wound up. Finish a contract, sell something yourself, or borrow again.</div>`);
+    }
 
     const visitors = s.visitors || [];
     const fireCrew = visitors.filter(v => v.kind === 'firefighter').length;
