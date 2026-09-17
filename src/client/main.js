@@ -5,8 +5,12 @@ import { initUI, render as renderUI, sceneHandlers } from './ui/toolbar.js';
 import { initTitle, showTitle, showSummary, syncEndScreen } from './ui/title.js';
 import * as Inspector from './ui/inspector.js';
 import * as Menus from './ui/menus.js';
+import * as Audio from './audio.js';
+const { initAudio, play: playSfx } = Audio;
 
 function boot() {
+    initAudio();
+    G.sfx = playSfx;              // systems call G.sfx('name'); silent until the first gesture
     // Whether there was something to come back to decides what the title screen offers. Read
     // before init(), which replaces a missing save with a fresh state and would hide the answer.
     const hadSave = hasSave();
@@ -37,7 +41,7 @@ function boot() {
     window.lab = {
         get state() { return G.state; },
         get scene() { return G.scene; },
-        G, gm: GM, newGame, title: { showTitle, showSummary }, inspector: Inspector, menus: Menus
+        G, gm: GM, newGame, title: { showTitle, showSummary }, inspector: Inspector, menus: Menus, audio: Audio
     };
 }
 

@@ -130,6 +130,7 @@ export function deliverOrders() {
     if (crates) {
         G.onToast(`Delivery at the door: ${names}, ${crates} crate${crates > 1 ? 's' : ''} to be put away`);
     } else {
+        G.sfx('delivery');
         G.onToast(`Delivery arrived: ${names}`);
     }
     dirtyUI();

@@ -46,8 +46,21 @@ const EQUIP_COLOR = {
 
 // Idle chatter around the break room. Coffee/radio lines only fire in their own context
 // (by the coffee machine, or once the radio's been bought); lab lines are always fair game.
+//
+// How often it fires is deliberately low. Rolling often with a high chance meant four people in
+// a break room talked over each other continuously, which stopped reading as idle chat and
+// started reading as noise. Each person also goes quiet for a while after speaking, so one
+// chatterbox cannot hold the floor.
+const CHATTER_ROLL_EVERY = 0.9;      // seconds between rolls, per person
+const CHATTER_CHANCE = 0.018;        // chance per roll
+const CHATTER_COOLDOWN = 20;         // seconds before the same person pipes up again
 const COFFEE_QUOTES = ["This coffee is terrible.", "Who finished the pot?!", "Is this even decaf?", "We need a coffee run.", "Cold again...", "Whose mug is this?"];
-const RADIO_QUOTES = ["Who changed the station?!", "Not this song again...", "Who turned it up?!", "Put the jazz back on.", "Way too loud!", "Can we agree on ONE station?"];
+// Each of these names the radio. The old set ("Who changed the station?!", "Way too loud!") read
+// as somebody complaining about nothing in particular unless you already knew the lab had a radio
+// in it, which is exactly the thing the line was supposed to tell you.
+const RADIO_QUOTES = ["Who changed the radio station?", "Turn that radio down!", "Not this song again. Whose radio playlist is this?",
+                      "Put the jazz back on the radio.", "That radio has been on the same station all week.",
+                      "Can we agree on one radio station?"];
 const LAB_QUOTES = ["Where are my goggles?", "Is it Friday yet?", "I mislabeled a tube...", "Who moved my clipboard?", "Five more minutes...", "This centrifuge is cursed.", "Did I turn off the burner?"];
 
 // Rooms (Cleanroom, Dark Room, the ML containment labs) are floor rather than furniture. They
@@ -116,6 +129,11 @@ const CARRY_POSE = { arm: -1.15, lean: 0.04, amp: 0, rate: 0, alt: false };
 // at this point so they sit in the hands instead of near them.
 const CARRY_HAND = { y: 0.55, forward: 0.28 };
 const ARM_SWING = 0.42;          // how far the arms swing when walking empty-handed
+// Coffee. One unhurried sip every SIP_PERIOD seconds, taking up SIP_SHARE of that; the rest of
+// the time the mug is simply held. Raising it continuously read less like a coffee break and more
+// like somebody drinking as fast as they could.
+const SIP_PERIOD = 9;            // seconds between sips
+const SIP_SHARE = 0.14;          // fraction of the cycle spent actually raising and lowering it
 
 // Mopping: the arms, the handle and the torso all read from this one stroke, so the hands can
 // never drift off the handle they are supposed to be gripping.
@@ -1129,28 +1147,29 @@ class LabScene {
             }
         } else if (e.type === 'firealarm') {
             // A round grey sounder bolted flat to the wall, not a box standing on the floor. Its
-            // backplate lands exactly on the wall's inner face (the shell slab spans 0.34–0.66
-            // from the tile centre) with the bell standing proud of it into the room. Buried any
-            // deeper and it vanishes into the wall from inside; any shallower and it floats.
-            // Which wall it's on isn't the player's to get wrong either: grid.wallFacing() snaps
-            // the rotation at placement time, so there is always a drawn wall right behind it.
+            // Hangs from the ceiling, in the middle of its tile, facing down. It used to be a
+            // wall fitting, which meant it could only go where there was an outside wall to hang
+            // on -- so the middle of a big room, which is where you actually want a sounder, was
+            // the one place it could not go.
             //
-            // It sits at cornice height, 1.39–1.71 against a 1.60 wall with an 0.18 trim on top
-            //, which is high enough that its geometry clears every machine in the catalogue,
-            // measured one by one, even the three that are taller than it overall.
-            const zFace = 0.27, y = 1.55;
-            const backplate = cyl(0.08, 0.08, 0.06, 12, 0x8a9196); backplate.rotation.x = Math.PI / 2;
-            backplate.position.set(0, y, zFace + 0.05); g.add(backplate);
-            const bell = cyl(0.16, 0.14, 0.07, 14, col); bell.rotation.x = Math.PI / 2;
-            bell.position.set(0, y, zFace); g.add(bell);
-            const rim = cyl(0.165, 0.165, 0.02, 14, 0x6b7075); rim.rotation.x = Math.PI / 2;
-            rim.position.set(0, y, zFace - 0.035); g.add(rim);
-            const boss = cyl(0.05, 0.05, 0.03, 10, 0x6b7075); boss.rotation.x = Math.PI / 2;
-            boss.position.set(0, y, zFace - 0.05); g.add(boss);
+            // The lab is drawn with no roof, so a fitting simply parked at ceiling height reads as
+            // hovering in mid-air. Hence the pendant: a fixing plate sitting at the height the
+            // walls imply a ceiling would be (1.60 wall plus its 0.18 trim), and a stem down to
+            // the sounder. The stem is what sells it. The eye follows it up to a surface that is
+            // not drawn and accepts one is there.
+            const ceilY = 1.82, y = 1.5;
+            const plate = box(0.24, 0.05, 0.24, 0x8a9196);
+            plate.position.set(0, ceilY, 0); g.add(plate);
+            const stem = cyl(0.035, 0.035, ceilY - y - 0.08, 8, 0x6b7075);
+            stem.position.set(0, (ceilY + y) / 2 - 0.02, 0); g.add(stem);
+            const body = cyl(0.17, 0.13, 0.1, 14, col);              // the sounder, tapering down
+            body.position.set(0, y, 0); g.add(body);
+            const rim = cyl(0.135, 0.135, 0.02, 14, 0x6b7075);
+            rim.position.set(0, y - 0.06, 0); g.add(rim);
             // The one bit of colour: a beacon on the underside that only lights while it's going
             // off, so a quiet alarm reads as a grey fitting and a sounding one is unmistakable.
-            const lamp = cyl(0.055, 0.045, 0.06, 8, 0xe0454a, { transparent: true, opacity: 0.95 });
-            lamp.position.set(0, y - 0.19, zFace); lamp.visible = false;
+            const lamp = cyl(0.06, 0.05, 0.05, 10, 0xe0454a, { transparent: true, opacity: 0.95 });
+            lamp.position.set(0, y - 0.1, 0); lamp.visible = false;
             lamp.userData.alarmLamp = true; g.add(lamp);
         } else if (e.type === 'fridge' || e.type === 'freezer') {
             // The cabinet stops short of the door, leaving a shallow recess with lit shelves and
@@ -1492,6 +1511,18 @@ class LabScene {
             torso.add(arms[side]);
             armParts.push(upper);
         }
+        // A mug, held in the right hand and hidden until somebody is actually stood in the break
+        // room with a coffee. Parented to the arm so it follows the hand for free.
+        const mug = new THREE.Group();
+        const cup = cyl(0.055, 0.045, 0.1, 8, 0xf4ede0);
+        const brew = cyl(0.045, 0.045, 0.012, 8, 0x4a2f1c); brew.position.y = 0.045;
+        const grip = box(0.02, 0.05, 0.02, 0xf4ede0); grip.position.set(0.06, 0, 0);
+        mug.add(cup, brew, grip);
+        mug.position.set(0, -0.36, 0.02);
+        mug.visible = false;
+        arms.r.add(mug);
+        g.userData.mug = mug;
+
         g.userData.arms = arms;
         g.userData.armSleeves = armParts;      // recoloured with the coat when gowning up
         g.userData.coat = coat; g.userData.legs = legs; g.userData.hood = hood; g.userData.visor = visor;
@@ -1690,6 +1721,18 @@ class LabScene {
     _poseStaff(mesh, moving) {
         const arms = mesh.userData.arms;
         if (!arms || !mesh.userData.torso) return;
+        // A coffee in the break room. The mug rests at waist height and is raised for an
+        // occasional slow sip -- most of a break is spent holding it, not drinking it. The timing
+        // is offset per person so a room of them doesn't drink in unison.
+        if (mesh.userData.drinking) {
+            const cycle = ((this.elapsed + (mesh.userData.id % 7) * 1.7) % SIP_PERIOD) / SIP_PERIOD;
+            const from = 1 - SIP_SHARE;
+            const sip = cycle > from ? Math.sin((cycle - from) / SIP_SHARE * Math.PI) : 0;
+            arms.r.rotation.x = -0.55 - sip * 1.45;
+            arms.l.rotation.x = -0.1;
+            mesh.userData.torso.rotation.x = -sip * 0.12;
+            return;
+        }
         if (mesh.userData.mopping) {
             // Both hands stay on the handle, so the arms ride the same stroke the mop does:
             // reaching out on the push, drawn back in on the pull. One hand grips higher up the
@@ -1961,6 +2004,11 @@ class LabScene {
             const idling = s.state === 'idle' || s.state === 'resting';
             const cm = this.coffeeMachine.position;
             mesh.userData.chatterEligible = idling && Math.hypot(s.wx - cm.x, s.wz - cm.z) < 2.0;
+            // Anyone on a break by the coffee machine has one in their hand. Same test the coffee
+            // chatter uses, so the line about the coffee and the coffee itself agree.
+            const hasCoffee = mesh.userData.chatterEligible && s.state === 'resting';
+            mesh.userData.drinking = hasCoffee;
+            if (mesh.userData.mug) mesh.userData.mug.visible = hasCoffee;
             mesh.userData.radioEligible = idling && state.upgrades.radio > 0;
         });
         // Delivery crates. Their own map for the same reason visitors have one: they're a distinct
@@ -2205,15 +2253,17 @@ class LabScene {
         const ud = mesh.userData;
         if (ud.chatterText && this.elapsed > ud.chatterUntil) ud.chatterText = null;
         if (ud.chatterText || this.elapsed < ud.nextChatterRoll) return;
-        ud.nextChatterRoll = this.elapsed + 0.4;
+        ud.nextChatterRoll = this.elapsed + CHATTER_ROLL_EVERY;
         if (!ud.chatterEligible && !ud.radioEligible) return;
-        if (Math.random() >= 0.05) return;
+        if (this.elapsed < (ud.chatterCooldown || 0)) return;
+        if (Math.random() >= CHATTER_CHANCE) return;
         let pool;
         if (ud.chatterEligible && ud.radioEligible) pool = [COFFEE_QUOTES, RADIO_QUOTES, LAB_QUOTES][Math.floor(Math.random() * 3)];
         else if (ud.chatterEligible) pool = Math.random() < 0.65 ? COFFEE_QUOTES : LAB_QUOTES;
         else pool = Math.random() < 0.65 ? RADIO_QUOTES : LAB_QUOTES;
         ud.chatterText = pool[Math.floor(Math.random() * pool.length)];
         ud.chatterUntil = this.elapsed + 3 + Math.random() * 1.5;
+        ud.chatterCooldown = ud.chatterUntil + CHATTER_COOLDOWN;
     }
 
     // Projects every currently-chattering worker's head position to screen space and positions a

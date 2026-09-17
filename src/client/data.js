@@ -68,8 +68,11 @@ export const BUILD = {
                   desc: "Sealed, filtered floor, laid one tile at a time. A Chromatograph only runs pharma-grade Chroma while standing on it. Needs an Airlock. A plain door would let the filtered air straight out. Rating 4." },
     door:       { name: 'Door',          cost: 180,  cat: 'Utility', door: 'door', foot: [1, 1], minLevel: 3,
                   desc: "A way into a room. Goes on one of the room's own edge tiles and opens whichever way it faces, so rotate it to point outward before placing. Costs no floor space. Enough for a Dark Room." },
-    firealarm:  { name: 'Fire Alarm',    cost: 600,  cat: 'Utility', mount: true, foot: [1, 1], minLevel: 1,
-                  desc: "Wall-mounted sounder. Evacuates the lab and calls the brigade by itself, provided you keep it serviced." },
+    // `mount` means a fitting that hangs rather than stands on the floor: it doesn't block the
+    // tile and staff walk under it. `ceiling` narrows that to hanging from above rather than off
+    // a wall, which frees it from needing a wall to be next to and from having a facing at all.
+    firealarm:  { name: 'Fire Alarm',    cost: 600,  cat: 'Utility', mount: true, ceiling: true, foot: [1, 1], minLevel: 1,
+                  desc: "Ceiling sounder. Put it anywhere with floor under it. Evacuates the lab and calls the brigade by itself, provided you keep it serviced." },
     airlock:    { name: 'Airlock',       cost: 520,  cat: 'Utility', door: 'airlock', foot: [1, 1], minLevel: 2,
                   desc: "A double-door vestibule, so the room never loses its air. Placed like a Door, on an edge tile, facing out. Cleanrooms and Containment Labs take nothing less, and staff gown up passing through." }
 };
@@ -269,7 +272,7 @@ export const FIRE_DEATH_CHANCE = 0.55;     // rolled once when that timer runs o
 export const FIRE_REP_PENALTY = 25;
 // How likely an alarm is to actually go off, by condition: useless when it's never been looked at,
 // near-certain when it's freshly serviced. Same maintenance loop as everything else.
-// An alarm never "runs", so run-wear can't touch it. It just quietly rots on the wall instead,
+// An alarm never "runs", so run-wear can't touch it. It just quietly rots up there instead,
 // which is what makes forgetting about it the trap rather than a one-off purchase decision.
 export const ALARM_DECAY_PER_DAY = 4;
 export const ALARM_MIN_RELIABILITY = 0.25;
@@ -473,10 +476,16 @@ export const UPGRADES = {
 // depth of the lot so the entrance opens straight into it) with a wing on each side. Both wings
 // directly border the hall, so however you buy them the lab always stays one connected building —
 // no disconnected plots. The four unclaimed corners are just lawn.
+// You start owning only the south half of the main hall, the end the front door opens onto. The
+// north half is the same building -- it draws inside the shell like any unbought plot does, as
+// bare ground you can see but not build on -- and is the natural first thing to buy. Opening on
+// the whole hall meant a new lab had more floor than it could ever fill, so the first real
+// decision (spend on space, or on a machine) never came up.
 export const ZONES = [
-    { id: 'main', name: 'Main Lab',  x0: 4,  z0: 0, w: 8, h: 14, cost: 0,    startOwned: true },
-    { id: 'west', name: 'West Wing', x0: 0,  z0: 5, w: 4, h: 7,  cost: 2400, startOwned: false },
-    { id: 'east', name: 'East Wing', x0: 12, z0: 5, w: 4, h: 7,  cost: 2400, startOwned: false }
+    { id: 'main',  name: 'Main Hall',  x0: 4,  z0: 6, w: 8, h: 8,  cost: 0,    startOwned: true },
+    { id: 'north', name: 'North Hall', x0: 4,  z0: 0, w: 8, h: 6,  cost: 3200, startOwned: false },
+    { id: 'west',  name: 'West Wing',  x0: 0,  z0: 5, w: 4, h: 7,  cost: 2400, startOwned: false },
+    { id: 'east',  name: 'East Wing',  x0: 12, z0: 5, w: 4, h: 7,  cost: 2400, startOwned: false }
 ];
 
 // Utility bill: what it costs per day to run the lab.

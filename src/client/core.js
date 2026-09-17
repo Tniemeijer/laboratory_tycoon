@@ -16,6 +16,7 @@ export const G = {
     _nav: null,
     _navVersion: -1,
     onToast: () => {},
+    sfx: () => {},               // wired by main.js to the audio module; a no-op until then
     onUIDirty: () => {},
     releaseWorkerJob: null       // wired by systems/staff.js at import time — avoids a staff<->samples import cycle
 };

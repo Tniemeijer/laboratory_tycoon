@@ -148,13 +148,15 @@ export function placeEquipment(type, tx, tz, rot) {
     if (!chk.ok) { G.onToast(`Can't build here (${chk.why === 'unowned land' ? 'buy this plot first' : chk.why})`, true); return false; }
     s.money -= BUILD[type].cost;
     // A wall fitting faces its wall, not whichever way the ghost happened to be pointing.
-    if (BUILD[type].mount) rot = wallFacing(s, tx, tz, rot);
+    // A ceiling fitting has no wall to face, so its rotation is left alone.
+    if (BUILD[type].mount && !BUILD[type].ceiling) rot = wallFacing(s, tx, tz, rot);
     s.equipment.push({
         id: nid(), type, tx, tz, rot: rot || 0,
         slots: BUILD[type].slots || 0, processing: [], reserved: 0,
         staged: [], condition: 100, broken: false, operateClaim: null
     });
     bumpNav();
+    G.sfx('build.place');
     G.onToast(`Built ${BUILD[type].name}`);
     warnSealedRooms();
     dirtyUI();
@@ -170,7 +172,7 @@ export function moveEquipment(id, tx, tz, rot) {
     const r = rot == null ? e.rot : rot;
     const chk = canPlace(e.type, tx, tz, r, e.id);       // ignoreId: it mustn't collide with itself
     if (!chk.ok) { G.onToast(`Can't move there (${chk.why === 'unowned land' ? 'buy this plot first' : chk.why})`, true); return false; }
-    e.tx = tx; e.tz = tz; e.rot = BUILD[e.type].mount ? wallFacing(s, tx, tz, r) : r;
+    e.tx = tx; e.tz = tz; e.rot = (BUILD[e.type].mount && !BUILD[e.type].ceiling) ? wallFacing(s, tx, tz, r) : r;
     // Samples parked in its staging (or mid-run) travel with it. Otherwise they'd pop back into
     // existence at the machine's old spot the moment their run finished.
     const aboard = new Set([...(e.staged || []).map(x => x.sampleId),
@@ -195,6 +197,7 @@ export function rotateEquipment(id) {
     // Rotating a wall fitting steps it round to the *next wall* on its tile rather than to the
     // next compass point, so on a corner tile you can pick which of the two walls it hangs on and
     // on a single-wall tile it simply doesn't move.
+    if (BUILD[e.type].ceiling) return G.onToast('It hangs from the ceiling. There is no way round to turn it', true);
     if (BUILD[e.type].mount) {
         const nw = wallFacing(s, e.tx, e.tz, (e.rot + 1) % 4);
         if (nw === e.rot) return G.onToast('Only one wall on this tile', true);
@@ -221,6 +224,7 @@ export function demolish(id) {
     s.money += Math.round(BUILD[e.type].cost * 0.5);
     s.equipment.splice(i, 1);
     bumpNav();
+    G.sfx('build.sell');
     G.onToast(`Sold ${BUILD[e.type].name} (+$${Math.round(BUILD[e.type].cost * 0.5)})`);
     warnSealedRooms();
     dirtyUI();

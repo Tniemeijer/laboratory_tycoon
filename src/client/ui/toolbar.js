@@ -11,6 +11,7 @@ import {
 import { BUILDERS, wireMenu, setToolHandler } from './menus.js';
 import { renderTutorial } from './tutorial.js';
 import { selectStaff, clearSelection, render as renderInspector } from './inspector.js';
+import { isMuted, setMuted, getVolume, setVolume, play as playSfx } from '../audio.js';
 import { renderTasks } from './tasks.js';
 
 const $ = (id) => document.getElementById(id);
@@ -43,6 +44,62 @@ export function initUI() {
     $('bar-pause').addEventListener('click', () => togglePause());
     $('bar-speed').querySelectorAll('[data-speed]').forEach(b =>
         b.addEventListener('click', () => setSpeed(+b.dataset.speed)));
+    // Volume: a speaker in the bar whose arcs show the level, and a stepped bar to set it. Built
+    // from the same chunky cells the rest of the interface uses rather than an <input type=range>,
+    // which browsers draw in their own style and which looked like a dialog box had wandered in.
+    const soundBtn = $('bar-sound'), volPop = $('volpop'), volBar = $('volbar'), volNum = $('volnum');
+    const VOL_STEPS = 10;
+    for (let i = 0; i < VOL_STEPS; i++) volBar.appendChild(document.createElement('i'));
+    const paintSound = () => {
+        const v = isMuted() ? 0 : getVolume();
+        const bars = v <= 0 ? 0 : v < 0.34 ? 1 : v < 0.67 ? 2 : 3;
+        soundBtn.querySelectorAll('.arc').forEach((el, i) => el.classList.toggle('on', i < bars));
+        soundBtn.classList.toggle('off', v <= 0);
+        soundBtn.title = v <= 0 ? 'Muted' : `Volume ${Math.round(v * 100)}%`;
+        volNum.textContent = Math.round(v * 100) + '%';
+        volBar.setAttribute('aria-valuenow', String(Math.round(v * 100)));
+        const lit = Math.round(v * VOL_STEPS);
+        [...volBar.children].forEach((cell, i) => cell.classList.toggle('on', i < lit));
+    };
+    // Dragging to nothing is what mutes, so there is one control rather than a mute button and a
+    // level that can disagree with each other.
+    const applyVol = (v) => { v = Math.max(0, Math.min(1, v)); setVolume(v); setMuted(v <= 0); paintSound(); };
+    const volFromEvent = (e) => {
+        const r = volBar.getBoundingClientRect();
+        return Math.round(((e.clientX - r.left) / r.width) * VOL_STEPS) / VOL_STEPS;
+    };
+    volBar.addEventListener('pointerdown', (e) => {
+        volBar.setPointerCapture(e.pointerId);
+        applyVol(volFromEvent(e));
+    });
+    volBar.addEventListener('pointermove', (e) => {
+        if (volBar.hasPointerCapture(e.pointerId)) applyVol(volFromEvent(e));
+    });
+    volBar.addEventListener('pointerup', () => playSfx('ui.click'));
+    volBar.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { applyVol(getVolume() - 0.1); playSfx('ui.click'); }
+        else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { applyVol(getVolume() + 0.1); playSfx('ui.click'); }
+    });
+    const nudge = (d) => { applyVol((isMuted() ? 0 : getVolume()) + d); playSfx('ui.click'); };
+    $('voldown').addEventListener('click', () => nudge(-0.1));
+    $('volup').addEventListener('click', () => nudge(0.1));
+    soundBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        volPop.hidden = !volPop.hidden;
+        if (!volPop.hidden) {
+            // Measured after unhiding: offsetWidth is 0 on a hidden element, which would clamp the
+            // popover to the very edge of the window instead of inside it.
+            const r = soundBtn.getBoundingClientRect();
+            volPop.style.top = Math.round(r.bottom + 4) + 'px';
+            // Kept on screen: the speaker sits near the right edge, so anchoring the popover's
+            // left to the button would push it off on a narrow window.
+            volPop.style.left = Math.round(Math.max(6, Math.min(r.left, window.innerWidth - volPop.offsetWidth - 10))) + 'px';
+        }
+    });
+    volPop.addEventListener('click', (e) => e.stopPropagation());
+    volPop.addEventListener('pointerdown', (e) => e.stopPropagation());
+    document.addEventListener('click', () => { volPop.hidden = true; });
+    paintSound();
     $('bar-new').addEventListener('click', () => { if (confirm('Start a new game? Progress is lost.')) newGame(); });
     $('rotate-pill').addEventListener('click', () => rotateHotkey());
     $('dropdown-close').addEventListener('click', () => closeMenu());
@@ -96,13 +153,10 @@ export function initUI() {
     render(true);
     hint();
 
-    const TUTORIAL_KEY = 'labTycoonSeenTutorial';
-    try {
-        if (!localStorage.getItem(TUTORIAL_KEY)) {
-            localStorage.setItem(TUTORIAL_KEY, '1');
-            toggleMenu('help');
-        }
-    } catch (e) { /* private browsing etc. — just skip the auto-popup */ }
+    // A first run used to force the Help menu open. That dates from before the interactive
+    // tutorial: now it lands a wall of reference text on top of both the title screen and the
+    // tutorial panel that is trying to walk you through the same material, one step at a time.
+    // Help is still a click away, and the tutorial offers itself.
 }
 
 // ---------- tool selection ----------

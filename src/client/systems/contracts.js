@@ -66,6 +66,7 @@ export function acceptContract(id, spawnSample) {
     if (i === -1) return;
     const c = s.offers.splice(i, 1)[0];
     c.state = 'active';
+    G.sfx('contract.take');
     c.arrivals = makeArrivals(c.required, s.day, c.deadline);
     s.contracts.push(c);
     deliverDue(c, spawnSample);
@@ -87,6 +88,7 @@ export function completeContract(c) {
     c.state = 'done';
     s.contracts = s.contracts.filter(x => x !== c);
     const spoilNote = c.spoiledCount ? `, ${c.spoiledCount} spoiled` : '';
+    G.sfx('contract.done');
     G.onToast(`Contract complete! +$${cash}  +${rep} rep  (${Math.round(qAvg * 100)}% quality${spoilNote})`);
     dirtyUI();
 }
@@ -126,6 +128,7 @@ export function failContract(c, abandonSample) {
     c.state = 'failed';
     for (const sm of s.samples.slice()) if (sm.contractId === c.id) abandonSample(sm.id);
     s.contracts = s.contracts.filter(x => x !== c);
+    G.sfx('contract.fail');
     G.onToast(`Contract failed: ${c.name}  -${pen} rep`, true);
     dirtyUI();
 }

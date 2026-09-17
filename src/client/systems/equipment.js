@@ -76,6 +76,7 @@ function warnShortage(st, missing) {
     const key = 'short_' + missing;
     if (s.warns[key]) return;
     s.warns[key] = 1;
+    G.sfx('money.bad');
     G.onToast(`Out of ${missing}, ${BUILD[st.type].name} is stopped until it's restocked`, true);
 }
 
@@ -136,6 +137,7 @@ export function startRun(st, group) {
     // once no matter how full the machine is, which is exactly why it's worth waiting for a
     // fuller batch.
     for (const key of suppliesForCap(proto, cap)) takeStock(key, SUPPLIES[key].perSample ? n : 1);
+    G.sfx('machine.start');
 
     const clFactor = cleanliness() / 100;
     let dur = step.t * (b.timeMul[cap] || 1) * speedMul();
@@ -168,6 +170,7 @@ function applyWear(st, n) {
         const chance = (COND_BREAKDOWN_THRESHOLD - st.condition) / COND_BREAKDOWN_THRESHOLD * COND_BREAKDOWN_CHANCE_MAX;
         if (Math.random() < chance) {
             st.broken = true;
+            G.sfx('machine.broken');
             G.onToast(`${BUILD[st.type].name} broke down! Needs a mechanic.`, true);
         }
     }

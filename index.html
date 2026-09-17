@@ -39,6 +39,7 @@
                     <button data-speed="2" aria-label="Double speed">2×</button>
                     <button data-speed="3" aria-label="Triple speed">3×</button>
                 </span>
+                <button id="bar-sound" aria-label="Volume"><i class="spk"></i><i class="arc a1"></i><i class="arc a2"></i><i class="arc a3"></i></button>
                 <button id="bar-new">New</button>
             </div>
         </div>
@@ -68,6 +69,15 @@
             <button id="cam-rotate-left" aria-label="Rotate view left">⟲</button>
             <button id="cam-rotate-right" aria-label="Rotate view right">⟳</button>
         </div>
+        <!-- Volume slider, opened from the speaker in the top bar. See ui/toolbar.js. -->
+        <div id="volpop" hidden>
+            <button id="voldown" aria-label="Quieter">−</button>
+            <div id="volbar" role="slider" tabindex="0" aria-label="Volume"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="70"></div>
+            <button id="volup" aria-label="Louder">+</button>
+            <span id="volnum">70%</span>
+        </div>
+
         <div id="toast"></div>
 
         <!-- Title screen and end-of-run summary, the same overlay in two states. See ui/title.js.

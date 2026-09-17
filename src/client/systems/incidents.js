@@ -81,6 +81,7 @@ export function startFire(e, silent) {
     for (const w of s.staff) if (w.job && (w.job.stationId === e.id || w.job.operateId === e.id)) G.releaseWorkerJob(w);
     if (!silent) {
         s.stats.fires = (s.stats.fires || 0) + 1;
+        G.sfx('fire');
         G.onToast(`FIRE, ${BUILD[e.type].name} is alight!`, true);
         // The alarm's whole job: doing this for you while you're looking at another screen.
         if (!s.evacuating && Math.random() < alarmReliability()) {
@@ -104,6 +105,7 @@ export function evacuate() {
     const s = G.state;
     if (s.evacuating) return;
     s.evacuating = true;
+    G.sfx('alarm');
     // Contractors leave too. Nobody is servicing a centrifuge while the building burns. Whatever
     // they hadn't got to is still broken and still on the mechanic's list, so it costs the
     // call-out fee to have them back, not the work itself.
@@ -233,6 +235,7 @@ export function startOutbreak(e) {
     if (!group) return false;
     s.outbreak = { tiles: group, day: s.day, crewDay: null, source: BUILD[e.type].name };
     s.stats.outbreaks = (s.stats.outbreaks || 0) + 1;
+    G.sfx('outbreak');
     s.reputation = Math.max(0, s.reputation - OUTBREAK_REP_PENALTY);
     G.onToast(`CONTAINMENT BREACH. The ${BUILD[e.type].name} let something out. Room sealed.`, true);
 

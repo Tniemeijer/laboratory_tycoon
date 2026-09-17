@@ -315,7 +315,7 @@ export function zoneOwnedTileCount(ownedZones) {
 function tileBlocked(equipment, tx, tz, ignoreId, placingRoom) {
     for (const e of equipment) {
         if (e.id === ignoreId) continue;
-        if (BUILD[e.type].mount) continue;                   // hangs on the wall above. See mountBlocked()
+        if (BUILD[e.type].mount) continue;                   // hangs above the tile. See mountBlocked()
         if (!footTiles(e.type, e.tx, e.tz, e.rot).some(([x, z]) => x === tx && z === tz)) continue;
         if (!!BUILD[e.type].room !== placingRoom) continue;   // floor vs. furniture. Different layers
         return true;
@@ -406,7 +406,8 @@ export function canPlace(state, type, tx, tz, rot, ignoreId) {
                               : tileBlocked(state.equipment, x, z, ignoreId, !!b.room);
         if (clash) return { ok: false, why: 'blocked' };
     }
-    if (b.mount && !wallAdjacent(state, tx, tz)) return { ok: false, why: 'needs an outside wall to hang on' };
+    // A ceiling fitting only needs floor beneath it; a wall fitting needs a wall to hang on.
+    if (b.mount && !b.ceiling && !wallAdjacent(state, tx, tz)) return { ok: false, why: 'needs an outside wall to hang on' };
     // A doorway has to actually be in a wall: it goes on one of the room's own tiles and opens
     // outward, and it has to be good enough for what that room is holding in.
     if (b.door) {

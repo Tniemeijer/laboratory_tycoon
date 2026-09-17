@@ -113,6 +113,60 @@ html, body {
 .speeds button.on { background: #f0a03c; box-shadow: inset 0 0 0 2px #fff2d8; position: relative; }
 
 #bar button:hover { background: var(--btn-hi); }
+/* The speaker is drawn from boxes for the same reason the pause icon is: 🔈 is emoji-presentation
+   by default, so phones swapped in a glossy colour glyph at its own size and baseline instead of
+   the flat pixel shape it is on desktop. Shapes have no font to substitute. The three bars double
+   as the level readout -- lit ones are the current volume, dim ones the headroom left. */
+#bar-sound {
+    display: inline-flex; align-items: center; gap: 2px;
+    min-width: 40px; height: 29px; padding: 0 9px; position: relative;
+}
+/* The whole speaker is one box clipped to a polygon rather than a rectangle plus a border
+   triangle. Border triangles are defined by which side the colour is on, which is easy to get
+   backwards -- both attempts at it here came out as a "previous track" button and then as an
+   arrow. A polygon states the silhouette outright: a short body on the left, then a cone whose
+   narrow end meets it and whose wide end faces right. */
+#bar-sound .spk {
+    display: block; width: 14px; height: 15px; background: var(--ink);
+    clip-path: polygon(0 32%, 38% 32%, 100% 0, 100% 100%, 38% 68%, 0 68%);
+    margin-right: 3px;
+}
+#bar-sound .arc { display: block; width: 3px; background: var(--edge-lite); }
+#bar-sound .a1 { height: 5px; }
+#bar-sound .a2 { height: 9px; }
+#bar-sound .a3 { height: 13px; }
+#bar-sound .arc.on { background: var(--ink); }
+#bar-sound.off .spk { background: var(--edge-lite); }
+#bar-sound.off::after {                  /* struck through when there is nothing to hear */
+    content: ''; position: absolute; left: 9px; width: 22px; top: 50%; height: 2px;
+    background: var(--red); transform: rotate(-38deg); transform-origin: center;
+}
+#volpop {
+    position: absolute; z-index: 60; display: flex; align-items: center; gap: 6px;
+    background: var(--panel); border: 3px solid var(--edge);
+    box-shadow: inset 0 0 0 2px var(--edge-lite); padding: 6px 8px;
+    /* #hud is pointer-events:none and only re-enables it for a short list of selectors. Without
+       this the popover is visible but completely dead: no clicks, no drags, nothing. That is why
+       the first version of this slider did nothing at all. */
+    pointer-events: auto;
+}
+#volpop[hidden] { display: none; }
+#volpop button {
+    background: var(--btn); border: 2px solid var(--edge); color: var(--ink);
+    font-family: inherit; font-weight: 700; font-size: 13px; line-height: 1;
+    padding: 3px 7px; cursor: pointer;
+}
+#volpop button:hover { background: var(--btn-hi); }
+/* A stepped level bar in the same chunky style as the rest of the interface, rather than the
+   browser's own slider widget. */
+#volbar {
+    display: flex; gap: 2px; padding: 2px; cursor: pointer; touch-action: none;
+    background: #6b4a2a; border: 2px solid var(--edge);
+}
+#volbar i { display: block; width: 9px; height: 14px; background: #4a341f; }
+#volbar i.on { background: var(--bar-accent); }
+#volbar:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+#volnum { font-size: 11px; min-width: 34px; text-align: right; }
 #bar button:active { transform: translateY(1px); }
 .menu-btn.open { background: #f0a03c; box-shadow: inset 0 0 0 2px #fff2d8; }
 
