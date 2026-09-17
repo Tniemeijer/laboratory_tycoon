@@ -34,9 +34,9 @@ export const BUILD = {
     sequencer:  { name: 'DNA Sequencer', cost: 9500, cat: 'Processing', caps: ['sequence'],
                   timeMul: { sequence: 1.0 }, slots: 1, batch: 4, foot: [2, 2], minLevel: 4,
                   desc: 'High-throughput sequencing for genomics work. Far and away the priciest thing in the catalogue, and slow per run, but it reads a full flow cell of 4 samples at once, so it earns its keep on volume. Rating 4.' },
-    analysisdesk: { name: 'Analysis Desk', cost: 950, cat: 'Processing', caps: ['analyze'],
+    analysisdesk: { name: 'Workstation', cost: 950, cat: 'Processing', caps: ['analyze'],
                   timeMul: { analyze: 0.85 }, slots: 1, batch: 2, attended: true, foot: [1, 1], minLevel: 1,
-                  desc: 'A desk and a computer for writing reports up properly. Far quicker than squinting at one on a lab bench, though a scientist has to sit there for the whole run. 2 reports at a time.' },
+                  desc: 'A desk and a computer. Writes reports up properly, far quicker than squinting at one on a lab bench, though a scientist has to sit there for the whole run. 2 reports at a time. Buy the Procurement upgrade and it is also where stock gets ordered: tick a scientist for Orders and they will sit here keeping the stockroom topped up.' },
     serverrack: { name: 'Server Rack',   cost: 3800, cat: 'Processing', caps: ['compute'],
                   timeMul: { compute: 1.0 }, slots: 1, batch: 4, autoStart: true, autoFeed: true, foot: [1, 1], minLevel: 4,
                   desc: 'Crunches raw sequencer output into something a human can read. Reads travel over the network, so nobody carries anything and nobody starts it. Samples land here on their own. 4 at a time. Rating 4.' },
@@ -469,7 +469,11 @@ export const UPGRADES = {
     clean:     { name: 'Cleaning Supplies', base: 1000, mult: 1.8, max: 4, desc: 'Slower grime buildup, faster mopping' },
     radio:     { name: 'Break Room Radio',  base: 1200, mult: 1.9, max: 3, desc: '+8% staff walking speed per level. Expect complaints' },
     cart:      { name: 'Sample Cart',       base: 1800, mult: 2.0, max: 3, desc: '+1 sample carried per trip per level' },
-    storage:   { name: 'Stockroom',         base: 900,  mult: 1.8, max: 4, desc: 'Extends the stockroom annex. More racking and more shelf space each level' }
+    storage:   { name: 'Stockroom',         base: 900,  mult: 1.8, max: 4, desc: 'Extends the stockroom annex. More racking and more shelf space each level' },
+    // A one-off, not a ladder: you either have somebody doing the ordering or you don't. Buying it
+    // puts the Procurement Desk in the Build menu; building one puts an Orders tickbox on your
+    // staff. Two steps on purpose -- the upgrade is the capability, the desk is where it happens.
+    orders:    { name: 'Procurement',       base: 1800, mult: 1,   max: 1, desc: 'Unlocks the Orders role. A scientist sat at any Workstation keeps the stockroom topped up from what the lab actually gets through' }
 };
 
 // Purchasable lab plots. The building is a tall central hall (free, start owned, runs the full
@@ -528,6 +532,19 @@ export const DISMISS_REP_PENALTY = 6;
 export const RECEIVERSHIP_DEBT = -4000;
 export const RECEIVERSHIP_GRACE_DAYS = 4;
 export const RECEIVERSHIP_SALE_FACTOR = 0.45;    // what the bank gets for your kit, being a forced sale
+
+// ---------- doing the ordering for you ----------
+// A scientist on Orders reorders from what the lab actually got through, not from a fixed target:
+// they aim to keep this many days of the recent burn rate on the shelf. Buying to a flat number
+// would either starve a busy lab or fill a quiet one's stockroom with things it never uses.
+//
+// The guardrails matter more than the policy. This spends the player's money without asking, so
+// it never dips into the reserve, never orders what is already on its way, and never overfills
+// the stockroom. Getting any of those wrong turns a convenience into a thief.
+export const ORDER_COVER_DAYS = 3;        // days of stock to aim for
+export const ORDER_CASH_RESERVE = 1500;   // never spend the lab below this
+export const ORDER_MIN_BATCH = 4;         // don't bother walking to the desk for less than this
+export const ORDER_DESK_TIME = 5;         // seconds at the desk placing them
 
 export const REP_LEVELS = [0, 150, 380, 720, 1150];
 export const DAY_LENGTH = 60;

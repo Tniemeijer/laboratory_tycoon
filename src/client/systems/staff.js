@@ -10,7 +10,7 @@ import {
     SKIN_TONES, HAIR_COLORS,
     SKILL_CAP_ALIAS, SKILL_XP_PER_RUN, SKILL_XP_PER_EXTRA_SAMPLE, SKILL_XP_PER_LEVEL, SKILL_MAX_LEVEL,
     SKILL_SPEED_PER_LEVEL, SKILL_QUALITY_PER_LEVEL,
-    STAFF_TRAITS, STAFF_PERKS, TRAIT_SECOND_CHANCE, CAREER_XP_PER_RUN, CAREER_XP_PER_EXTRA_SAMPLE, PERK_CHOICES, CAREER_MAX_LEVEL, WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE} from '../data.js';
+    STAFF_TRAITS, STAFF_PERKS, TRAIT_SECOND_CHANCE, CAREER_XP_PER_RUN, CAREER_XP_PER_EXTRA_SAMPLE, PERK_CHOICES, CAREER_MAX_LEVEL, WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE, ORDER_DESK_TIME} from '../data.js';
 import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyUI, cartCapacity, equipCaps, staffMods, careerLevel, perksOwed} from '../core.js';
 import { GRID, tileToWorld, worldToTile, footTiles, restTile, stockTile, gateWorld, musterTile } from '../grid.js';
 import { aStar, nearestAccess } from '../pathfind.js';
@@ -20,7 +20,7 @@ import { completeContract } from './contracts.js';
 import { stageSample, batchReady, startRun, runShortage } from './equipment.js';
 import { isBurning, isQuarantined } from './incidents.js';
 import { underService } from './visitors.js';
-import { addStock } from './economy.js';
+import { addStock, orderPlan, placeOrders} from './economy.js';
 
 const STAFF_SPEED = 2.7;
 
@@ -48,7 +48,7 @@ export function hireStaff() {
     const w = gateWorld();          // walks in the front door, like a new hire should
     s.staff.push({
         id: nid(), name: SURNAMES[Math.floor(Math.random() * SURNAMES.length)],
-        caps: { process: true, clean: true }, wx: w.x, wz: w.z, state: 'idle',
+        caps: { process: true, clean: true, orders: false }, wx: w.x, wz: w.z, state: 'idle',
         job: null, carrying: null, reservedStation: null,
         path: null, pathV: -1, tendTimer: 0,
         skin: SKIN_TONES[Math.floor(Math.random() * SKIN_TONES.length)],
@@ -102,9 +102,13 @@ function resetWorker(w) {
     if (w.job && w.job.mopKey != null && G.state.dirtClaims[w.job.mopKey] === w.id) {
         delete G.state.dirtClaims[w.job.mopKey];
     }
-    if (w.job && w.job.operateId != null) {
-        const e = G.state.equipment.find(x => x.id === w.job.operateId);
-        if (e && e.operateClaim === w.id) e.operateClaim = null;
+    // Both of these claim a machine the same way, so both have to give it back. A leaked claim
+    // is invisible and permanent: the desk (or the machine) is never offered to anybody again.
+    for (const key of ['operateId', 'deskId']) {
+        if (w.job && w.job[key] != null) {
+            const e = G.state.equipment.find(x => x.id === w.job[key]);
+            if (e && e.operateClaim === w.id) e.operateClaim = null;
+        }
     }
     releaseReservation(w);
     if (w.job && w.job.crateId != null) {
@@ -187,7 +191,7 @@ function spotClaim(p) {
 }
 // Only people who have stopped are worth moving. Anyone mid-walk resolves a collision by simply
 // carrying on, and nudging them just fights their pathing.
-const STATIONARY = new Set(['idle', 'resting', 'mopping', 'atStation', 'prepping', 'filling',
+const STATIONARY = new Set(['idle', 'resting', 'mopping', 'atStation', 'prepping', 'filling', 'ordering',
                             'storing', 'operating', 'tending', 'stocking', 'evacuatingDone', 'sickDone']);
 // Can this worker stand here? Same rules the pathfinder uses, so giving way can never put someone
 // inside a wall or through a partition.
@@ -513,6 +517,9 @@ function assignJob(w) {
     // contents can't be used until they're on a shelf, and a run that needs them is stalled in the
     // meantime. Cheap to check — usually there's nothing waiting.
     if (caps.process && pickCrateJob(w)) return true;
+    // Ordering. Checked after the hands-on work: a shelf that needs topping up in three days'
+    // time is never more urgent than a sample rotting now, and the desk will still be there.
+    if (caps.orders && pickOrderJob(w)) return true;
     if (caps.process && s.water < WATER_MIN) {
         const from = worldToTile(w.wx, w.wz);
         for (const e of s.equipment) {
@@ -716,6 +723,26 @@ export function updateStaff(dt) {
                     s.stats.mopped++;
                     resetWorker(w);
                 }
+                break;
+            }
+            case 'toDesk': {
+                const e = s.equipment.find(x => x.id === w.job.deskId);
+                if (!e || !stationUsable(e)) { resetWorker(w); break; }
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') { w.state = 'ordering'; w.tendTimer = 0; }
+                break;
+            }
+            case 'ordering': {
+                const e = s.equipment.find(x => x.id === w.job.deskId);
+                if (!e || !stationUsable(e)) { resetWorker(w); break; }
+                w.tendTimer += dt;
+                if (w.tendTimer < ORDER_DESK_TIME) break;
+                // Re-planned on arrival rather than reusing what was true when they set off: a
+                // few seconds of walking is long enough for a run to eat the stock, or for the
+                // player to have ordered the same thing themselves.
+                placeOrders(orderPlan());
+                resetWorker(w);
                 break;
             }
             case 'toPickup': {
@@ -925,6 +952,31 @@ function samplePriority(sm) {
     const daysLeft = c ? c.deadline - G.state.day : 99;
     const deadlinePressure = Math.max(0, 10 - daysLeft) * 8;
     return (100 - sm.fresh) + deadlinePressure;
+}
+
+// A trip to the Procurement Desk, taken only when there is actually something to order and a
+// free desk to do it at. orderPlan() is asked first so nobody walks across the lab to sit down and
+// find there was nothing to buy.
+function pickOrderJob(w) {
+    const s = G.state;
+    if (!(s.upgrades.orders > 0)) return false;
+    // Any Workstation that nobody is sat at. One mid-run has an analyst in the chair, and
+    // ordering is never urgent enough to interrupt one: the shelf is short in days, the run
+    // finishes in seconds.
+    const desks = s.equipment.filter(e => equipCaps(e).includes('analyze') && stationUsable(e)
+        && e.operateClaim == null && !(e.processing && e.processing.length));
+    if (!desks.length) return false;
+    if (!orderPlan().length) return false;
+    const from = worldToTile(w.wx, w.wz);
+    for (const e of desks) {
+        const acc = accessTile(e, from);
+        if (!acc) continue;
+        e.operateClaim = w.id;
+        w.job = { deskId: e.id };
+        setGoalTile(w, acc); w.state = 'toDesk';
+        return true;
+    }
+    return false;
 }
 
 function pickSampleJob(w) {

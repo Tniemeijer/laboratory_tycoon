@@ -5,7 +5,7 @@
 import {
     UPGRADES, ZONES, INGREDIENTS, SUPPLIES, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_MAX, LOAN_BORROW_STEP, LOAN_REPAY_STEP,
     PRICE_DRIFT, PRICE_PULL, PRICE_MIN, PRICE_MAX, ORDER_LEAD_DAYS, STOCK_TIER_CAPACITY,
-    CRATE_UNITS, WATER_ITEM, RECEIVERSHIP_DEBT, RECEIVERSHIP_GRACE_DAYS, RECEIVERSHIP_SALE_FACTOR, BUILD} from '../data.js';
+    CRATE_UNITS, WATER_ITEM, RECEIVERSHIP_DEBT, RECEIVERSHIP_GRACE_DAYS, RECEIVERSHIP_SALE_FACTOR, BUILD, ORDER_COVER_DAYS, ORDER_CASH_RESERVE, ORDER_MIN_BATCH} from '../data.js';
 import { G, nid, upgradeCost, utilityBreakdown, bumpNav, dirtyUI} from '../core.js';
 import { queueTile, tileToWorld, annexLevel } from '../grid.js';
 
@@ -48,7 +48,94 @@ export function takeStock(key, qty = 1) {
     const b = bin(key);
     if ((b[key] || 0) < qty) return false;
     b[key] -= qty;
+    // Recorded so a scientist on Orders can reorder from what the lab actually used rather than
+    // from a number somebody guessed. Also what a "days of cover" readout would read from.
+    const s = G.state;
+    s.usedToday ||= {};
+    s.usedToday[key] = (s.usedToday[key] || 0) + qty;
     return true;
+}
+// Called on the day rollover. Yesterday's totals are what the ordering works from: a full day is
+// a big enough sample to be meaningful and small enough to react to a lab that just got busier.
+export function rollUsage() {
+    const s = G.state;
+    s.usedPrev = s.usedToday || {};
+    s.usedToday = {};
+}
+// How much of something the lab is getting through per day, blending yesterday with today so far
+// so a lab that has just started working doesn't read as needing nothing.
+export function dailyBurn(key) {
+    const s = G.state;
+    const prev = (s.usedPrev || {})[key] || 0;
+    const today = (s.usedToday || {})[key] || 0;
+    const sofar = Math.max(0, Math.min(1, s.dayFrac || 0));
+    // today's rate, extrapolated, but only trusted in proportion to how much of the day has run
+    const todayRate = sofar > 0.05 ? today / sofar : 0;
+    return prev > 0 || todayRate > 0 ? Math.max(prev, 0) * (1 - sofar) + todayRate * sofar : 0;
+}
+
+// What a scientist at the desk would order right now: everything running below the cover target,
+// biggest shortfall first, trimmed to fit the shelf and the cash reserve. Returns the list without
+// placing anything, so the same function answers "is it worth walking over there" and "what do I
+// actually buy when I get there".
+export function orderPlan() {
+    const s = G.state;
+    const spendable = Math.max(0, s.money - ORDER_CASH_RESERVE);
+    if (spendable <= 0) return [];
+    let room = stockFree();
+    if (room <= 0) return [];
+    const onOrder = (key) => (s.orders || []).reduce((n, o) => n + (o.key === key ? o.qty : 0), 0)
+                           + (s.deliveries || []).reduce((n, c) => n + (c.key === key ? c.qty : 0), 0);
+    const wants = [];
+    for (const key of [...Object.keys(SUPPLIES), ...Object.keys(INGREDIENTS)]) {
+        const burn = dailyBurn(key);
+        if (burn <= 0) continue;                         // never used here, never ordered
+        const target = Math.ceil(burn * ORDER_COVER_DAYS);
+        const have = stockCount(key) + onOrder(key);
+        const short = target - have;
+        if (short >= ORDER_MIN_BATCH) wants.push({ key, qty: short, burn });
+    }
+    wants.sort((a, b) => (b.qty / b.burn) - (a.qty / a.burn));   // whoever runs out soonest first
+    // Two passes, because a small stockroom and one hungry item is the normal case early on. A
+    // single greedy pass spent the entire shelf on disposables and bought no slides at all, which
+    // leaves the lab just as stopped as before, only for a different reason. So: everyone gets a
+    // fair share of the room first, then whatever is left over goes to the most urgent.
+    const plan = [];
+    let budget = spendable;
+    const share = Math.max(ORDER_MIN_BATCH, Math.floor(room / wants.length));
+    for (const pass of [share, Infinity]) {
+        for (const w of wants) {
+            if (room <= 0 || budget <= 0) break;
+            const price = unitPrice(w.key);
+            const already = plan.find(p => p.key === w.key);
+            const outstanding = w.qty - (already ? already.qty : 0);
+            if (outstanding <= 0) continue;
+            const qty = Math.min(outstanding, pass, room, Math.floor(budget / price));
+            if (qty <= 0 || (!already && qty < ORDER_MIN_BATCH)) continue;
+            if (already) { already.qty += qty; already.cost += qty * price; }
+            else plan.push({ key: w.key, qty, cost: qty * price });
+            room -= qty; budget -= qty * price;
+        }
+    }
+    return plan;
+}
+// Places the plan. Announced as one line rather than one per item: a scientist coming back from
+// the desk having ordered four things should read as one errand, not four.
+export function placeOrders(plan) {
+    const s = G.state;
+    const done = [];
+    for (const p of plan) {
+        if (p.qty > stockFree() || s.money - p.cost < ORDER_CASH_RESERVE) continue;
+        s.money -= p.cost;
+        s.orders.push({ id: nid(), key: p.key, qty: p.qty, day: s.day + ORDER_LEAD_DAYS });
+        done.push(`${p.qty}x ${stockItem(p.key).name}`);
+    }
+    if (done.length) {
+        G.sfx('ui.menu');
+        G.onToast(`Ordered ${done.join(', ')}`);
+        dirtyUI();
+    }
+    return done.length;
 }
 
 // Shelf space is whatever the stockroom annex has grown to. See STOCK_TIER_CAPACITY and the

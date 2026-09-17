@@ -2,7 +2,7 @@
 // Owns the save file, the day/tick loop, and equipment placement. Gameplay systems live in
 // ./systems/*; this module wires them together and re-exports the public API the UI/scene use.
 
-import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, ROOM_DOOR_REQ, SUITED_ROOM_KINDS, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, STAFF_TRAITS, STAFF_PERKS, CAREER_XP_PER_LEVEL, CAREER_MAX_LEVEL, CAREER_XP_PER_RUN, SKILL_XP_PER_RUN, RECEIVERSHIP_GRACE_DAYS, suppliesForStep, suppliesForCap} from './data.js';
+import { BUILD, REAGENTS, INGREDIENTS, SUPPLIES, SUPPLY_FOR_CAP, WATER_ITEM, ZONES, PROTOCOLS, UPGRADES, CAP_LABEL, ROOM_BONUS_CAP, ROOM_DOOR_REQ, SUITED_ROOM_KINDS, WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS, START_LOAN, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKIN_TONES, HAIR_COLORS, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, STAFF_TRAITS, STAFF_PERKS, CAREER_XP_PER_LEVEL, CAREER_MAX_LEVEL, CAREER_XP_PER_RUN, SKILL_XP_PER_RUN, RECEIVERSHIP_GRACE_DAYS, suppliesForStep, suppliesForCap, ORDER_COVER_DAYS, ORDER_CASH_RESERVE} from './data.js';
 import {
     G, nid, resetIdCounter, currentIdCounter, dirtyUI, bumpNav, nav,
     labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt,
@@ -12,7 +12,7 @@ import { refillOffers, acceptContract as acceptContractSys, failContract, cancel
 import { spawnSample, abandonSample, updateSamples } from './systems/samples.js';
 import { updateStaff, hireStaff, toggleStaffCap, fireStaff, choosePerk} from './systems/staff.js';
 import { buyUpgrade, buyZone, orderStock, driftPrices, deliverOrders, unitPrice, priceTrend, interestDue, nextInterestDay,
-         stockCapacity, stockUsed, stockFree, stockCount, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan, checkSolvency, endRun} from './systems/economy.js';
+         stockCapacity, stockUsed, stockFree, stockCount, applyDailyUtilities, applyDailyInterest, borrowLoan, repayLoan, checkSolvency, endRun, rollUsage, orderPlan, placeOrders} from './systems/economy.js';
 import { recomputeGrime } from './systems/dirt.js';
 import { updateEquipment, callMechanic, mechanicVisit, mechanicQuote, runShortage} from './systems/equipment.js';
 import { updateVisitors, clearVisitors, mechanicOnSite } from './systems/visitors.js';
@@ -33,7 +33,7 @@ export {
     WATER_BATCH, WATER_MIN, REAGENT_WATER_COST, MECH_MAINT_THRESHOLD, BREW_QUEUE_MAX, REAGENT_BATCH, ROOM_DOOR_REQ,
     LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_STEP, LOAN_MAX, SKILL_MAX_LEVEL, SKILL_XP_PER_LEVEL, ROOM_BONUS_CAP, SUITED_ROOM_KINDS,
     STAFF_TRAITS, STAFF_PERKS, CAREER_XP_PER_LEVEL, CAREER_MAX_LEVEL,
-    RECEIVERSHIP_GRACE_DAYS,
+    RECEIVERSHIP_GRACE_DAYS, ORDER_COVER_DAYS, ORDER_CASH_RESERVE,
     G, labLevel, repToNext, coldCapacity, coldUsed, maxStaff, upgradeCost, ownedCaps, equipCaps, roomAt, nav,
     cleanliness, reagentCount, ingredientCount, ownedTileCount, utilityBreakdown,
     bottleneck, machineLoad, staffLoad,
@@ -41,7 +41,7 @@ export {
     hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, borrowLoan, repayLoan,
     orderStock, unitPrice, priceTrend, stockCapacity, stockUsed, stockFree, stockCount,
     interestDue, nextInterestDay, callMechanic, mechanicQuote, mechanicOnSite,
-    cancelCost, checkSolvency, endRun, runShortage,
+    cancelCost, checkSolvency, endRun, runShortage, orderPlan, placeOrders,
     evacuate, endEvacuation, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
     alarmReliability, isBurning, isQuarantined,
     DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS
@@ -92,12 +92,13 @@ function fresh() {
         outbreak: null,             // { tiles, day, crewDay, source } while a containment room is sealed
         lawsuits: [],
         visitors: [],               // people on site who aren't staff — see systems/visitors.js
-        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0 },
+        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0, orders: 0 },
         stats: { done: 0, failed: 0, cancelled: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0, fires: 0, outbreaks: 0, deaths: 0, shelved: 0,
                  peakRep: 0, peakMoney: START_LOAN },
         receivership: null,         // { since } once the bank has stepped in — see systems/economy.js
         over: null,                 // { day, reason, summary } once the run has ended
         util: freshUtil(),
+        usedToday: {}, usedPrev: {},   // what the lab got through, for the ordering desk
         schema: SAVE_SCHEMA,
         tutorial: { step: 0, done: false },   // guided first run — see ui/tutorial.js
         navVersion: 0,
@@ -265,6 +266,7 @@ function advanceTime(dt) {
     while (s.dayFrac >= 1) {
         s.dayFrac -= 1; s.day++;
         rollUtilisation();          // the day just ended becomes what the Lab menu reports
+        rollUsage();                // ...and what the ordering desk buys from
         mechanicVisit();            // they work overnight and it's done by morning
         dailyIncidents();           // …and so do the disinfection crew, sick leave and the courts
         applyDailyUtilities();
@@ -352,7 +354,7 @@ function loadSave() {
         s.fires = [];
         // ML-1 / ML-2 were folded into a single Containment Lab; carry old ones across.
         for (const e of s.equipment) if (e.type === 'ml1lab' || e.type === 'ml2lab') e.type = 'containment';
-        // The Auto-Analyzer was dropped; anything still standing becomes an Analysis Desk, which
+        // The Auto-Analyzer was dropped; anything still standing becomes a Workstation, which
         // does the same job in a single tile.
         for (const e of s.equipment) if (e.type === 'analyzer') { e.type = 'analysisdesk'; e.rot = 0; }
         // Anything left whose type this build doesn't know about is dropped rather than kept: the
@@ -415,6 +417,9 @@ function loadSave() {
             e.operateClaim = null;
         }
         if (!s.util) s.util = freshUtil();      // the day-load readout starts collecting fresh
+        s.usedToday ||= {}; s.usedPrev ||= {};   // the ordering desk's burn-rate history
+        // A save from before Procurement existed simply hasn't bought it.
+        for (const k of Object.keys(UPGRADES)) if (s.upgrades[k] == null) s.upgrades[k] = 0;
         for (const w of s.staff) {
             w.job = null; w.carrying = null; w.reservedStation = null; w.path = null; w.state = 'idle';
             w.burnT = 0;
@@ -439,6 +444,9 @@ function loadSave() {
                 const banked = Object.values(w.skillXp || {}).reduce((n, v) => n + v, 0);
                 w.xp = Math.round(banked * (CAREER_XP_PER_RUN / SKILL_XP_PER_RUN));
             }
+            // Ordering is opt-in, and predates nobody: a save from before the Procurement Desk
+            // existed simply has nobody ticked for it, which is the right default anyway.
+            if (w.caps && w.caps.orders == null) w.caps.orders = false;
             // Repairs are a call-out trade now, not something anyone on the payroll does.
             if (w.caps) delete w.caps.mechanic;
             if (w.name && w.name.startsWith('Dr. ')) w.name = w.name.slice(4);

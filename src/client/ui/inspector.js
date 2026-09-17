@@ -27,6 +27,7 @@ const DOING = {
     atStation: 'dropping a sample off', toPrep: 'off to brew a reagent', prepping: 'brewing a reagent',
     toSink: 'off to the sink', filling: 'drawing water', toColdPickup: 'off to fetch a sample',
     toFridge: 'off to cold storage', storing: 'shelving a sample', toOperate: 'off to start a run',
+    toDesk: 'off to the procurement desk', ordering: 'ordering stock',
     operating: 'starting a run', tending: 'working a machine', toCrate: 'off to a delivery',
     toStock: 'carrying a crate to the stockroom', stocking: 'putting stock away',
     evacuating: 'evacuating', evacuatingDone: 'outside', sick: 'going home sick', sickDone: 'off sick'
@@ -100,7 +101,8 @@ export function render() {
             const l = Math.min(SKILL_MAX_LEVEL, Math.floor(xp[c] / SKILL_XP_PER_LEVEL));
             return `<span class="skill">${CAP_LABEL[c] || c} <b>Lv${l}</b></span>`;
         }).join('')}</div>` : ''}
-        <div class="ins-caps">${w.caps.process ? '☑' : '☐'} Process &nbsp; ${w.caps.clean ? '☑' : '☐'} Clean</div>`;
+        <div class="ins-caps">${w.caps.process ? '☑' : '☐'} Process &nbsp; ${w.caps.clean ? '☑' : '☐'} Clean${
+            w.caps.orders ? ' &nbsp; ☑ Orders' : ''}</div>`;
     const x = el.querySelector('[data-close]');
     if (x) x.addEventListener('click', () => clearSelection());
 }

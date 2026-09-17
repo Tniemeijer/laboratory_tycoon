@@ -116,6 +116,9 @@ const WORK_POSES = {
         default:      { arm: -0.90, lean: 0.16, amp: 0.22, rate: 2.8, alt: true }
     },
     operating: { default: { arm: -1.15, lean: 0.12, amp: 0.36, rate: 4.2, alt: true } },
+    // Typing: hands up at a keyboard, alternating fast, barely leaning. The same shape as the
+    // Workstation pose, because it is the same activity.
+    ordering:  { default: { arm: -1.25, lean: 0.12, amp: 0.20, rate: 6.5, alt: true } },
     atStation: { default: { arm: -1.05, lean: 0.14, amp: 0.10, rate: 1.8, alt: false } },
     prepping:  { default: { arm: -0.95, lean: 0.14, amp: 0.48, rate: 4.6, alt: false } },
     filling:   { default: { arm: -0.85, lean: 0.10, amp: 0.10, rate: 1.1, alt: false } },

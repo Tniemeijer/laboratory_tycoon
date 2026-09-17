@@ -8,6 +8,8 @@ Samples arrive at the front door with a deadline and a shelf life. Your
 scientists carry them from machine to machine, one step at a time, while you try
 to buy the right equipment and restock before the contract arrives.
 
+You start with half a hall and a debt. Everything else you buy.
+
 It runs entirely in the browser. Nothing to install, nothing to sign up for, and
 it saves to your own machine.
 
@@ -49,6 +51,14 @@ samples through a centrifuge takes barely longer than one. Learning to let work
 *accumulate* instead of chasing every tube individually is the difference between
 a lab and a very expensive hallway.
 
+**The lab tells you what's wrong with it.** Open **Lab** and it reports where the
+day actually went: what share of it each machine spent running, and how your
+staff split theirs between working, walking and standing spare. Then it names the
+one thing holding you up — a machine everyone is queueing for, not enough
+scientists, or a floor plan that has them walking half the day. Buy a centrifuge,
+hire someone, or move two machines closer together: it's the difference between
+guessing and knowing.
+
 **Rooms are floor, not furniture.** Lay a Dark Room, Cleanroom or Containment Lab
 one tile at a time, in whatever shape you like, straight over machines you
 already own. They don't replace equipment — they *upgrade* whatever stands
@@ -57,14 +67,24 @@ Cleanroom unlocks the entire Pharma chain. A room walls itself in, so you decide
 where the way in goes: a Door for a Dark Room, an Airlock for anything holding an
 atmosphere — and you'll watch your staff gown up as they walk through it.
 
-**Somebody has to actually be there.** A Lab Bench, Microscope, Analysis Desk or
+**Somebody has to actually be there.** A Lab Bench, Microscope, Workstation or
 hood keeps a scientist standing at it for the whole run. Automated kit doesn't.
 That trade — cheap machines that eat your staff's time versus expensive ones that
 don't — is most of the mid-game.
 
-**Your scientists get better.** Whoever starts a run gets the credit, and their
+**Your scientists are people, and they cost money.** Each one turns up with
+innate traits that are theirs for good — Meticulous, Quick Hands, Gentle, or
+Dawdler, Heavy-Handed, Sloppy — and the bad ones are cheaper to employ, which is
+the whole point of them. Whoever starts a run gets the credit for it, so their
 skill at that specific task grows: faster runs, better quality. Nobody trains at
 a machine you never let them touch.
+
+Work also earns career levels, and every level lets you **pick a skill** for that
+scientist: Specialist, Porter, Caretaker, Janitor, Quick Study. They draw a wage
+every single day that rises with their level, so a veteran is genuinely better
+and genuinely dearer, and letting someone go is a real decision rather than a
+free one. Click anybody on the floor to see who they are, what they're doing, and
+— if they're doing nothing — exactly why not.
 
 **Deliveries turn up at the door, not on a shelf.** Order consumables and raw
 ingredients from Stock and they arrive next morning as crates stacked in the
@@ -78,24 +98,37 @@ slides, flow cells or stock solution it needs — the batch just sits there and 
 machine idles until you restock. Nothing gets improvised at reduced quality, so
 an empty stockroom is a stoppage, not a discount.
 
+**You can hand the ordering over.** Buy **Procurement** under Upgrades and an
+**Orders** tickbox appears on your scientists. Anyone ticked will sit at a
+Workstation and restock the shelf from what the lab actually got through, keeping
+roughly three days' cover. They won't spend you into the reserve, won't reorder
+what's already in transit, and won't overfill the stockroom — but they will spend
+your money without asking, which is the point of hiring them.
+
 **Reagents are brewed to order.** Saline, Solvent and Buffer don't restock
 themselves. You ask for a batch, a free scientist takes the ingredient and some
 distilled water to a bench and makes it — and it perishes a few days later. Brew
 early and you bin it; brew late and the line waits.
 
 **Money is a leash.** You open on a loan, not a grant. Interest is billed in cash
-every five days whether you've earned anything or not. There's a utility bill
-every single day. Suppliers re-quote every morning, so the week's solvent is
+every five days whether you've earned anything or not. Wages and the utility bill
+land every single day. Suppliers re-quote every morning, so the week's solvent is
 cheap on Tuesday and isn't on Thursday — and stock takes a day to arrive, so you
 have to order before you know what's coming.
+
+**And you can lose.** Go far enough into the red and the bank calls the loan in.
+Your contracts are written off, an administrator starts selling a machine off
+your floor every morning, and you get four days to climb back above zero. Fail
+and the lab is wound up, with a summary of how it went while it lasted: days
+survived, contracts delivered, best reputation, most money you ever held.
 
 **And then it catches fire.** Equipment wears out. A worn machine runs slow, then
 breaks, and nobody on your payroll owns a wrench — maintenance is a trade you
 ring up, and the mechanic walks in the next morning and works down the list in
 front of you. Skip that for long enough and a machine goes up. Fire spreads. You
-get a button to evacuate and a button to call the brigade, or you buy a Fire
-Alarm to do both for you — assuming you've been servicing *that*, which you
-haven't. Neglect something in the Containment Lab instead and it breaches: the
+get a button to evacuate and a button to call the brigade, or you hang a Fire
+Alarm from the ceiling to do both for you — assuming you've been servicing
+*that*, which you haven't. Neglect something in the Containment Lab instead and it breaches: the
 room seals, whoever was inside goes off sick, and a crew in hazmat suits has to
 come and fog the place before you can use any of it again.
 
@@ -118,9 +151,16 @@ chances in court.
 | Sell something | `X` |
 | Pause | `P` |
 | Cancel / close | `Esc` |
+| Volume | the speaker in the top bar |
 
 Laying room floor keeps the tool in your hand, so you can click tile after tile
 and press `Esc` when the room is the shape you want.
+
+Every sound in the game is synthesised in the browser from oscillators and
+filtered noise — machines starting and finishing, breakdowns, deliveries,
+contracts won and lost, and the alarm. There are no audio files to download and
+nothing is recorded. Deliberately no footsteps: six scientists crossing a floor
+at 3× is a stampede.
 
 The game auto-saves to `localStorage` every in-game day. **New** wipes it and
 starts you over with a fresh loan and fresh optimism.
@@ -157,9 +197,11 @@ src/client/core.js            shared runtime state and derived stats
 src/client/grid.js            tiles, rooms, walls, doorways, nav building
 src/client/pathfind.js        A* that honours per-edge walls
 src/client/threeScene.js      isometric renderer, models, input, pixelation
+src/client/audio.js           every sound, synthesised at runtime
 src/client/systems/           contracts, samples, staff AI, equipment, economy,
                               dirt, incidents (fire/outbreak/lawsuits), visitors
-src/client/ui/                top bar, menus, build tools
+src/client/ui/                top bar, menus, build tools, title/summary screens,
+                              the interactive tutorial, the scientist inspector
 ```
 
 `src/server/` and `src/shared/` are left over from an abandoned client/server

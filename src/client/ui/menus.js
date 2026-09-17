@@ -15,7 +15,7 @@ import {
     bottleneck, machineLoad, staffLoad,
     careerLevel, perksOwed, dailyWage, choosePerk,
     acceptContract, cancelContract, cancelCost, hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, toggleColdStore, callMechanic,
-    borrowLoan, repayLoan, suppliesForStep} from '../game.js';
+    borrowLoan, repayLoan, suppliesForStep, ORDER_COVER_DAYS, ORDER_CASH_RESERVE} from '../game.js';
 import { sealedRooms } from '../grid.js';
 import { restartTutorial } from './tutorial.js';
 
@@ -38,8 +38,14 @@ let loanAmount = 2000;
 export function adjustLoanAmount(dir) {
     loanAmount = Math.max(LOAN_STEP, Math.min(LOAN_MAX, loanAmount + dir * LOAN_STEP));
 }
-const STAFF_CAPS = ['process', 'clean'];
-const STAFF_CAP_LABEL = { process: 'Process', clean: 'Clean' };
+// Orders only appears once the lab can actually do it: the Procurement upgrade bought, and an
+// Workstation to sit at. A tickbox for a job the lab cannot perform is just a question the
+// player can't answer.
+const STAFF_CAPS_BASE = ['process', 'clean'];
+const staffCaps = () => (G.state.upgrades.orders > 0
+    && G.state.equipment.some(e => (BUILD[e.type].caps || []).includes('analyze')))
+    ? [...STAFF_CAPS_BASE, 'orders'] : STAFF_CAPS_BASE;
+const STAFF_CAP_LABEL = { process: 'Process', clean: 'Clean', orders: 'Orders' };
 let _onToolSelect = () => {};
 export function setToolHandler(fn) { _onToolSelect = fn; }
 
@@ -323,7 +329,7 @@ export const BUILDERS = {
                     return `<span class="trait tp" title="${d.desc}">${d.name}</span>`;
                 }).join('')}</div>
                 <div class="roles">
-                  ${STAFF_CAPS.map(c =>
+                  ${staffCaps().map(c =>
                     `<button class="r cb ${w.caps[c] ? 'on' : ''}" data-cap="${w.id}:${c}">${w.caps[c] ? '☑' : '☐'} ${STAFF_CAP_LABEL[c]}</button>`).join('')}
                 </div>
                 ${skillBadges(w)}
@@ -570,10 +576,11 @@ export const BUILDERS = {
         const rows = [
             ['Chains', `Every contract is a sequence of steps and each needs its own machine. The contract card lists exactly what you're missing.`],
             ['Batching', `A sample dropped at a machine waits there for company. Runs go faster per sample when the batch is full. Let work pile up instead of chasing each tube.`],
-            ['Attended kit', `A Bench, Microscope, Analysis Desk or hood ties a scientist up for the whole run. Automated kit doesn't.`],
+            ['Attended kit', `A Bench, Microscope, Workstation or hood ties a scientist up for the whole run. Automated kit doesn't.`],
             ['Rooms', `Dark Room, Cleanroom and Containment Lab are floor you lay a tile at a time, over machines you already own. They upgrade whatever stands inside. Each needs a Door. An Airlock for the sealed ones, or it's inert.`],
             ['Stock', `Orders arrive next morning as crates at the door and must be carried to the stockroom. <b>A run will not start without the consumables it needs.</b> Extend the stockroom under Upgrades.`],
             ['Reagents', `Saline, Solvent and Buffer are brewed only when you order a batch in Stock, and they perish after a few days.`],
+            ['Ordering for you', `Buy <b>Procurement</b> under Upgrades and an <b>Orders</b> tickbox appears on any scientist, so long as you have a <b>Workstation</b> for them to sit at. Anyone ticked will sit at it and restock the shelf from what the lab actually got through, keeping about ${ORDER_COVER_DAYS} days' worth. They won't spend you below $${ORDER_CASH_RESERVE.toLocaleString()}, won't reorder what's already on its way, and won't overfill the stockroom.`],
             ['Your staff', `Every scientist is hired with innate traits, good and bad, that are theirs for good. Work earns them career levels, and each level lets you pick a skill for them in Staff. They draw a wage every day that rises with their level, so a veteran is better and dearer both.`],
             ['Wear', `Machines wear down, run slow, then break. Nobody on the payroll fixes them. Book a mechanic in Lab and they come the next morning.`],
             ['Accidents', `Neglected kit catches fire and spreads; a Fire Alarm evacuates and calls the brigade for you, if it's been serviced. Neglected kit in Containment breaches instead, sealing the room until a disinfection crew has been in.`],
@@ -668,6 +675,7 @@ function labelState(st) {
         toSink: 'to sink', filling: 'drawing water',
         toColdPickup: 'fetching sample', toFridge: 'to fridge', storing: 'shelving sample',
         toOperate: 'to machine', operating: 'starting a run', tending: 'working the bench',
+        toDesk: 'to the desk', ordering: 'ordering stock',
         toCrate: 'to the delivery', toStock: 'carrying a crate', stocking: 'putting stock away',
         evacuating: 'evacuating!', evacuatingDone: 'outside', sick: 'going home sick', sickDone: 'off sick'
     })[st] || st;
