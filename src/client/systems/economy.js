@@ -5,7 +5,7 @@
 import {
     UPGRADES, ZONES, INGREDIENTS, SUPPLIES, LOAN_INTEREST_RATE, LOAN_INTEREST_DAYS, LOAN_MAX, LOAN_BORROW_STEP, LOAN_REPAY_STEP,
     PRICE_DRIFT, PRICE_PULL, PRICE_MIN, PRICE_MAX, ORDER_LEAD_DAYS, STOCK_TIER_CAPACITY,
-    CRATE_UNITS, WATER_ITEM, RECEIVERSHIP_DEBT, RECEIVERSHIP_GRACE_DAYS, RECEIVERSHIP_SALE_FACTOR, BUILD, ORDER_COVER_DAYS, ORDER_CASH_RESERVE, ORDER_MIN_BATCH} from '../data.js';
+    CRATE_UNITS, WATER_ITEM, RECEIVERSHIP_DEBT, RECEIVERSHIP_GRACE_DAYS, RECEIVERSHIP_SALE_FACTOR, BUILD, ORDER_COVER_DAYS, ORDER_CASH_RESERVE, ORDER_MIN_BATCH, suppliesForStep} from '../data.js';
 import { G, nid, upgradeCost, utilityBreakdown, bumpNav, dirtyUI} from '../core.js';
 import { queueTile, tileToWorld, annexLevel } from '../grid.js';
 
@@ -74,6 +74,24 @@ export function dailyBurn(key) {
     return prev > 0 || todayRate > 0 ? Math.max(prev, 0) * (1 - sofar) + todayRate * sofar : 0;
 }
 
+// What the samples already in the building need for the step they're on now. Ordering off usage
+// alone has a blind spot: once the shelf is empty nothing runs, usage drops to zero, and a day
+// later the lab reads as needing nothing at all, so it never reorders the very thing it's stopped
+// for. Work waiting in the queue is demand whether or not anything has run yet.
+function pendingNeed(key) {
+    const s = G.state;
+    if (!SUPPLIES[key]) return 0;
+    let n = 0;
+    const runs = new Set();
+    for (const sm of s.samples) {
+        if (sm.state === 'processing') continue;            // already paid for
+        if (!suppliesForStep(sm.proto, sm.step).includes(key)) continue;
+        if (SUPPLIES[key].perSample) n++;
+        else runs.add(sm.proto + ':' + sm.step);            // one per run, not per sample
+    }
+    return n + runs.size;
+}
+
 // What a scientist at the desk would order right now: everything running below the cover target,
 // biggest shortfall first, trimmed to fit the shelf and the cash reserve. Returns the list without
 // placing anything, so the same function answers "is it worth walking over there" and "what do I
@@ -89,11 +107,14 @@ export function orderPlan() {
     const wants = [];
     for (const key of [...Object.keys(SUPPLIES), ...Object.keys(INGREDIENTS)]) {
         const burn = dailyBurn(key);
-        if (burn <= 0) continue;                         // never used here, never ordered
-        const target = Math.ceil(burn * ORDER_COVER_DAYS);
+        const pending = pendingNeed(key);
+        if (burn <= 0 && pending <= 0) continue;         // never used here, never ordered
+        const target = Math.max(Math.ceil(burn * ORDER_COVER_DAYS), pending);
         const have = stockCount(key) + onOrder(key);
-        const short = target - have;
-        if (short >= ORDER_MIN_BATCH) wants.push({ key, qty: short, burn });
+        let short = target - have;
+        // Work already stopped for want of it is worth the walk however small the shortfall.
+        if (short > 0 && pending > have) short = Math.max(short, ORDER_MIN_BATCH);
+        if (short >= ORDER_MIN_BATCH) wants.push({ key, qty: short, burn: Math.max(burn, pending / ORDER_COVER_DAYS) });
     }
     wants.sort((a, b) => (b.qty / b.burn) - (a.qty / a.burn));   // whoever runs out soonest first
     // Two passes, because a small stockroom and one hungry item is the normal case early on. A

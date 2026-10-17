@@ -77,6 +77,24 @@ const ANNEXES = {
             { key: 'rack', level: 3, tile: [15, 14], rot: 0 },
             { key: 'rack', level: 4, tile: [14, 14], rot: 0 }
         ]
+    },
+    waste: {
+        upgrade: 'waste',
+        // A strip out by the street, under the stockroom: deliveries come in and rubbish goes out
+        // the same side of the building. One tile deep, so it grows sideways, a skip at a time.
+        // The x=12 column is the way in from the end of the entrance corridor and stays clear,
+        // which is also where whoever is carrying a bag stands to tip it in.
+        max: { x0: 12, z0: 15, w: 4, h: 1 },
+        tiers: [
+            { x0: 12, z0: 15, w: 2, h: 1 },
+            { x0: 12, z0: 15, w: 3, h: 1 },
+            { x0: 12, z0: 15, w: 4, h: 1 }
+        ],
+        props: [
+            { key: 'skip', level: 0, tile: [13, 15], rot: 0 },
+            { key: 'skip', level: 1, tile: [14, 15], rot: 0 },
+            { key: 'skip', level: 2, tile: [15, 15], rot: 0 }
+        ]
     }
 };
 export const ANNEX_KINDS = Object.keys(ANNEXES);
@@ -110,6 +128,9 @@ export function breakRoomProps(state) { return annexProps(state, 'break'); }
 export function inBreakRoom(state, tx, tz) { return inAnnex(state, 'break', tx, tz); }
 export function stockRoom(state) { return annexRect(state, 'stock'); }
 export function inStockRoom(state, tx, tz) { return inAnnex(state, 'stock', tx, tz); }
+export function inWasteRoom(state, tx, tz) { return inAnnex(state, 'waste', tx, tz); }
+// Where somebody stands to tip a bag in: the clear column by the way in.
+export function wasteTile(state) { const r = annexRect(state, 'waste'); return [r.x0, r.z0]; }
 export const BREAK_ROOM_MAX = ANNEXES.break.max;
 
 const HANGOUT_OFFSETS = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]];
@@ -174,6 +195,10 @@ function doorwayUsable(state, x, z, roomTiles) {
     if (x < 0 || z < 0 || x >= GRID || z >= GRID) return false;
     if (!isWalkableGround(state, x, z)) return false;
     if (roomTiles.has(`${x},${z}`)) return false;
+    // Not into another annex. The waste store sits right up against the stockroom, and without
+    // this the stockroom's wide mouth would open straight into it (and the break room likewise
+    // into anything that grew next to it), turning two walled rooms into one.
+    if (inAnyAnnex(state, x, z)) return false;
     for (const e of state.equipment || []) {
         if (BUILD[e.type].room || BUILD[e.type].door || BUILD[e.type].mount) continue;   // floor, doorways and wall fittings are fine to stand on
         if (footTiles(e.type, e.tx, e.tz, e.rot).some(([ex, ez]) => ex === x && ez === z)) return false;
@@ -400,6 +425,7 @@ export function canPlace(state, type, tx, tz, rot, ignoreId) {
         // for sale.
         if (inBreakRoom(state, x, z)) return { ok: false, why: 'the break room' };
         if (inStockRoom(state, x, z)) return { ok: false, why: 'the stockroom' };
+        if (inWasteRoom(state, x, z)) return { ok: false, why: 'the waste store' };
         if (!isTileOwned(state.ownedZones, x, z)) return { ok: false, why: 'unowned land' };
         const clash = b.mount ? mountBlocked(state.equipment, x, z, ignoreId)
                     : b.door  ? doorBlocked(state.equipment, x, z, ignoreId)

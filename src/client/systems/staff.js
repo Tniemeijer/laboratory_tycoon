@@ -10,9 +10,11 @@ import {
     SKIN_TONES, HAIR_COLORS,
     SKILL_CAP_ALIAS, SKILL_XP_PER_RUN, SKILL_XP_PER_EXTRA_SAMPLE, SKILL_XP_PER_LEVEL, SKILL_MAX_LEVEL,
     SKILL_SPEED_PER_LEVEL, SKILL_QUALITY_PER_LEVEL,
-    STAFF_TRAITS, STAFF_PERKS, TRAIT_SECOND_CHANCE, CAREER_XP_PER_RUN, CAREER_XP_PER_EXTRA_SAMPLE, PERK_CHOICES, CAREER_MAX_LEVEL, WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE, ORDER_DESK_TIME} from '../data.js';
+    STAFF_TRAITS, STAFF_PERKS, TRAIT_SECOND_CHANCE, CAREER_XP_PER_RUN, CAREER_XP_PER_EXTRA_SAMPLE, PERK_CHOICES, CAREER_MAX_LEVEL, WEAR_PER_RUN, WEAR_PER_EXTRA_BATCH_SAMPLE, ORDER_DESK_TIME,
+    WASTE_BIN_CAP, WASTE_EMPTY_AT, WASTE_DUMP_TIME, WASTE_SWAP_TIME} from '../data.js';
 import { G, nid, nav, cleanliness, staffSpeedMul, maxStaff, reagentCount, dirtyUI, cartCapacity, equipCaps, staffMods, careerLevel, perksOwed} from '../core.js';
-import { GRID, tileToWorld, worldToTile, footTiles, restTile, stockTile, gateWorld, musterTile } from '../grid.js';
+import { GRID, tileToWorld, worldToTile, footTiles, restTile, stockTile, gateWorld, musterTile, wasteTile } from '../grid.js';
+import { isBin, hasBin, binFill, wasteRoomFree } from './waste.js';
 import { aStar, nearestAccess } from '../pathfind.js';
 import { addDirt, recomputeGrime, topDirtTile } from './dirt.js';
 import { curStep, isInert } from './samples.js';
@@ -20,7 +22,7 @@ import { completeContract } from './contracts.js';
 import { stageSample, batchReady, startRun, runShortage } from './equipment.js';
 import { isBurning, isQuarantined } from './incidents.js';
 import { underService } from './visitors.js';
-import { addStock, orderPlan, placeOrders} from './economy.js';
+import { addStock, takeStock, stockCount, orderPlan, placeOrders} from './economy.js';
 
 const STAFF_SPEED = 2.7;
 
@@ -121,6 +123,16 @@ function resetWorker(w) {
         }
     }
     w.carryingCrate = null;
+    if (w.job && w.job.binId != null) {
+        const bin = G.state.equipment.find(x => x.id === w.job.binId);
+        if (bin && bin.binClaim === w.id) bin.binClaim = null;
+        // Whatever they had in their hands is put back rather than vanishing. A full bin that never
+        // made it to the store goes back on its spot (if the spot is still there and still empty),
+        // and a fresh one that never made it to its spot goes back on the shelf.
+        if (w.carryingBin === 'full' && bin && !hasBin(bin)) { bin.hasBin = true; bin.waste = w.job.fill || 0; }
+        if (w.carryingBin === 'fresh') addStock('wastebin', 1);
+    }
+    w.carryingBin = null;
     const ids = w.job ? (w.job.sampleIds || (w.job.coldSampleId != null ? [w.job.coldSampleId] : [])) : [];
     for (const id of ids) {
         const sm = G.state.samples.find(x => x.id === id);
@@ -432,6 +444,77 @@ function pickCrateJob(w) {
     return true;
 }
 
+// A bin full enough to swap out. Fullest first, since that's the one about to overflow onto the
+// floor. Nothing is offered while the store has no room: the bin would only have to come straight
+// back, so it's left where it is and the player is told why.
+function liveBinClaims() {
+    const held = new Set();
+    for (const o of G.state.staff) if (o.job && o.job.binId != null) held.add(o.job.binId);
+    return held;
+}
+function pickBinJob(w) {
+    const s = G.state;
+    const held = liveBinClaims();
+    let best = null, bestFill = -1;
+    for (const e of s.equipment) {
+        if (!isBin(e) || !stationUsable(e)) continue;
+        if (e.binClaim != null && !held.has(e.id)) e.binClaim = null;   // stale, same as crates
+        if (e.binClaim != null || !hasBin(e)) continue;
+        const fill = binFill(e);
+        if (fill < WASTE_BIN_CAP * WASTE_EMPTY_AT) continue;
+        if (fill > bestFill) { bestFill = fill; best = e; }
+    }
+    if (!best) return false;
+    if (wasteRoomFree() <= 0) {
+        if (!s.warns.waste_store_full) {
+            s.warns.waste_store_full = 1;
+            G.onToast('The waste store is full. Full bins stay put until the next collection. Extend it under Upgrades', true);
+        }
+        return false;
+    }
+    const acc = accessTile(best, worldToTile(w.wx, w.wz));
+    if (!acc) return false;
+    best.binClaim = w.id;
+    // binOut reserves the bin's place in the store from now, not from when it arrives.
+    w.job = { binId: best.id, binOut: true };
+    setGoalTile(w, acc);
+    w.state = 'toBin';
+    return true;
+}
+// Fresh bins on the shelf that nobody has already set off to fetch.
+function binsUnclaimedInStock() {
+    let n = stockCount('wastebin');
+    for (const o of G.state.staff) if (o.job && o.job.refill && o.carryingBin !== 'fresh') n--;
+    return n;
+}
+// Sends this worker (already at the store, or idle anywhere) to the stockroom for a fresh bin to
+// put on `spot`.
+function startRefill(w, spot) {
+    spot.binClaim = w.id;
+    w.job = { binId: spot.id, refill: true };
+    setGoalTile(w, stockTile(G.state, _stockSpot++));
+    w.state = 'toBinStock';
+}
+// An empty spot, a newly built one or one whose bin went out while the shelf was bare. Nearest
+// first.
+function pickRefillJob(w) {
+    const s = G.state;
+    if (binsUnclaimedInStock() <= 0) return false;
+    const held = liveBinClaims();
+    const from = worldToTile(w.wx, w.wz);
+    let best = null, bestD = Infinity;
+    for (const e of s.equipment) {
+        if (!isBin(e) || !stationUsable(e) || hasBin(e)) continue;
+        if (e.binClaim != null && !held.has(e.id)) e.binClaim = null;
+        if (e.binClaim != null) continue;
+        const d = Math.abs(e.tx - from.tx) + Math.abs(e.tz - from.tz);
+        if (d < bestD) { bestD = d; best = e; }
+    }
+    if (!best) return false;
+    startRefill(w, best);
+    return true;
+}
+
 // Claims the spill for this worker so topDirtTile() won't hand it to anyone else. A later
 // responder to the same mess simply never sees it as a candidate.
 function claimMop(w, dirtiest) {
@@ -517,6 +600,10 @@ function assignJob(w) {
     // contents can't be used until they're on a shelf, and a run that needs them is stalled in the
     // meantime. Cheap to check — usually there's nothing waiting.
     if (caps.process && pickCrateJob(w)) return true;
+    // Swapping bins is everybody's job, cleaners and scientists alike. An empty spot gets a fresh
+    // bin as readily as a full one gets taken out: either way a machine nearby is about to start
+    // putting its waste on the floor.
+    if ((caps.clean || caps.process) && (pickBinJob(w) || pickRefillJob(w))) return true;
     // Ordering. Checked after the hands-on work: a shelf that needs topping up in three days'
     // time is never more urgent than a sample rotting now, and the desk will still be there.
     if (caps.orders && pickOrderJob(w)) return true;
@@ -577,7 +664,8 @@ function labIsQuiet() {
     // room. A batch that is merely part-full, and so still wants more, keeps the lab busy exactly
     // as it did before.
     if (s.samples.some(sm => sm.state === 'queued' && !sm.storedAt
-        && stationsFor(curStep(sm).cap).length && anyStationWantsMore(curStep(sm).cap))) return false;
+        && stationsFor(curStep(sm).cap).length && anyStationWantsMore(curStep(sm).cap)
+        && !runShortage(curStep(sm).cap, sm.proto, 1))) return false;
     // And a staged batch only counts if it could actually run. One that's stopped for want of
     // consumables will not become available until a delivery lands — and a delivery brings crates,
     // which makes the lab busy again on its own. Counting it kept everyone stood to attention
@@ -704,6 +792,74 @@ export function updateStaff(dt) {
                     s.stats.shelved = (s.stats.shelved || 0) + 1;
                 }
                 w.carryingCrate = null;
+                resetWorker(w);
+                dirtyUI();
+                break;
+            }
+            case 'toBin': {
+                const bin = s.equipment.find(x => x.id === w.job.binId);
+                if (!bin || !hasBin(bin)) { resetWorker(w); break; }
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') {
+                    // The lid goes on and the whole bin comes away, leaving the spot empty.
+                    w.job.fill = binFill(bin);
+                    bin.hasBin = false; bin.waste = 0;
+                    w.carryingBin = 'full';
+                    setGoalTile(w, wasteTile(s)); w.state = 'toWaste';
+                    dirtyUI();
+                }
+                break;
+            }
+            case 'toWaste': {
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') { w.state = 'dumping'; w.tendTimer = 0; }
+                break;
+            }
+            case 'dumping': {
+                w.tendTimer += dt;
+                if (w.tendTimer < WASTE_DUMP_TIME) break;
+                s.waste = (s.waste || 0) + 1;
+                w.carryingBin = null;
+                w.job.binOut = false;
+                // Straight on to the stockroom next door for its replacement, if there is one. The
+                // spot stays claimed, so the same person brings it back to the same place.
+                const spot = s.equipment.find(x => x.id === w.job.binId);
+                if (spot && !hasBin(spot) && binsUnclaimedInStock() > 0) startRefill(w, spot);
+                else resetWorker(w);
+                dirtyUI();
+                break;
+            }
+            case 'toBinStock': {
+                const spot = s.equipment.find(x => x.id === w.job.binId);
+                if (!spot || hasBin(spot)) { resetWorker(w); break; }
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') {
+                    // Someone else may have taken the last one off the shelf on the walk over.
+                    if (!takeStock('wastebin', 1)) { resetWorker(w); break; }
+                    w.carryingBin = 'fresh';
+                    const acc = accessTile(spot, worldToTile(w.wx, w.wz));
+                    if (!acc) { resetWorker(w); break; }
+                    setGoalTile(w, acc); w.state = 'toBinSpot';
+                    dirtyUI();
+                }
+                break;
+            }
+            case 'toBinSpot': {
+                const spot = s.equipment.find(x => x.id === w.job.binId);
+                if (!spot || hasBin(spot)) { resetWorker(w); break; }
+                const r = stepPath(w, dt);
+                if (r === 'blocked') resetWorker(w);
+                else if (r === 'arrived') { w.state = 'settingBin'; w.tendTimer = 0; }
+                break;
+            }
+            case 'settingBin': {
+                w.tendTimer += dt;
+                if (w.tendTimer < WASTE_SWAP_TIME) break;
+                const spot = s.equipment.find(x => x.id === w.job.binId);
+                if (spot && !hasBin(spot)) { spot.hasBin = true; spot.waste = 0; w.carryingBin = null; }
                 resetWorker(w);
                 dirtyUI();
                 break;
@@ -986,6 +1142,7 @@ function pickSampleJob(w) {
         if (sm.state !== 'queued' || sm.claimedBy) continue;
         const cap = curStep(sm).cap;
         if (!stationsFor(cap).length || !anyStationWantsMore(cap)) continue;
+        if (runShortage(cap, sm.proto, 1)) continue;    // its run can't start: leave it until stock lands
         const score = samplePriority(sm);
         if (score > bestScore) { bestScore = score; first = sm; }
     }

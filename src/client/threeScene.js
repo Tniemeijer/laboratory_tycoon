@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { BUILD, ZONES, PROTOCOLS, COND_SLOW_THRESHOLD, SUITED_ROOM_KINDS } from './data.js';
+import { BUILD, ZONES, PROTOCOLS, COND_SLOW_THRESHOLD, SUITED_ROOM_KINDS, WASTE_BIN_CAP, WASTE_TIER_CAPACITY } from './data.js';
 import {
     GRID, BUILD_MAX_Z, breakRoom, breakRoomProps, roomAreas, roomDoorways, breakRoomDoorway,
     ANNEX_KINDS, annexRect, annexProps, annexLevel, inAnnexFootprint, annexDoorways,
@@ -41,7 +41,7 @@ const EQUIP_COLOR = {
     bench: 0xc4cdd2, preprobot: 0x4a5560, microscope: 0x585e63, centrifuge: 0xe8ebed, incubator: 0xd6dadd,
     fridge: 0xf2f4f5, freezer: 0xd7dee0, mopcloset: 0xd88a5a, sink: 0xc9ced3, stockroom: 0x9a7247,
     scale: 0xe8ebed, chromatograph: 0xdfe3e5, sequencer: 0xe4e9ec, door: 0xb8c2c6, airlock: 0xcfd8dd, serverrack: 0x3a4046, analysisdesk: 0xd8dde1, darkroom: 0x2a2e33, cleanroom: 0xeef3f4, firealarm: 0xb9c1c6,
-    flowhood: 0xe8ebed, fumehood: 0xc9ced3
+    flowhood: 0xe8ebed, fumehood: 0xc9ced3, wastebin: 0x2f5fc4
 };
 
 // Idle chatter around the break room. Coffee/radio lines only fire in their own context
@@ -74,7 +74,8 @@ const ROOM_STYLE = {
     sterile: { light: 0xfdfefe, dark: 0xeaf2f5, wall: 0xe8eef1, trim: 0xb8c2c6 },
     contain: { light: 0xdff0d8, dark: 0xcde4c4, wall: 0xcfe0c4, trim: 0x5f8f4a },
     break:   { light: 0xe8d3ab, dark: 0xdcc294, wall: 0xc9ced3, trim: 0x97a1aa },
-    stock:   { light: 0xd9c9a6, dark: 0xcbb98f, wall: 0xb8a17d, trim: 0x8a7550 }
+    stock:   { light: 0xd9c9a6, dark: 0xcbb98f, wall: 0xb8a17d, trim: 0x8a7550 },
+    waste:   { light: 0xa9aea6, dark: 0x9aa096, wall: 0x7d8479, trim: 0x5f8f4a }
 };
 // Height of the sample tray per machine. The default sits just above a benchtop, but a
 // centrifuge carries its samples down in the rotor well instead.
@@ -123,7 +124,10 @@ const WORK_POSES = {
     prepping:  { default: { arm: -0.95, lean: 0.14, amp: 0.48, rate: 4.6, alt: false } },
     filling:   { default: { arm: -0.85, lean: 0.10, amp: 0.10, rate: 1.1, alt: false } },
     storing:   { default: { arm: -1.25, lean: 0.18, amp: 0.30, rate: 2.0, alt: false } },
-    stocking:  { default: { arm: -1.00, lean: 0.22, amp: 0.42, rate: 1.8, alt: false } }
+    stocking:  { default: { arm: -1.00, lean: 0.22, amp: 0.42, rate: 1.8, alt: false } },
+    // Heaving a bag up and over the lip of the skip: both arms together, big and slow.
+    dumping:   { default: { arm: -1.30, lean: 0.10, amp: 0.55, rate: 1.4, alt: false } },
+    settingBin: { default: { arm: -0.95, lean: 0.30, amp: 0.20, rate: 1.6, alt: false } }
 };
 // Hands out in front, holding whatever they're carrying, instead of swinging empty.
 const CARRY_POSE = { arm: -1.15, lean: 0.04, amp: 0, rate: 0, alt: false };
@@ -151,6 +155,9 @@ function poseFor(state, machineType) {
 }
 
 const PASS_BIAS = 0.8;
+// Samples are drawn at this fraction of their modelled size, loose or carried. Full size, a tube
+// was nearly as tall as the person holding it, and a queue of them at reception read as luggage.
+const SAMPLE_SCALE = 0.6;
 // How dark a machine gets at zero condition. Dull and grimy, still readable as itself.
 const SHADE_MIN = 0.5;
 const DIR4 = [[0, -1], [0, 1], [-1, 0], [1, 0]];
@@ -162,7 +169,7 @@ const BAR_Y = {
     bench: 0.85, preprobot: 1.62, microscope: 1.3, centrifuge: 0.95, incubator: 1.45,
     fridge: 1.5, freezer: 1.65, sink: 0.8, mopcloset: 1.45,
     scale: 0.75, chromatograph: 1.35, sequencer: 1.95, serverrack: 1.6, analysisdesk: 1.15, flowhood: 1.35, fumehood: 1.55, stockroom: 1.55,
-    firealarm: 1.75, door: 1.1, airlock: 1.1
+    firealarm: 1.75, door: 1.1, airlock: 1.1, wastebin: 0.95
 };
 
 // Frees the GPU-side buffers behind a discarded subtree. three.js doesn't do this on remove().
@@ -205,7 +212,7 @@ function limb(color, len = 0.22) {
 }
 // Contents chit on a delivery crate, so a stack of boxes is readable at a glance.
 const CRATE_TINT = {
-    disposable: 0xcfd8dd, slide: 0x9fd6e6, fluorlabel: 0xd98ad0, column: 0x8fd48f, flowcell: 0xf0c040,
+    disposable: 0xcfd8dd, slide: 0x9fd6e6, wastebin: 0x2f5fc4, fluorlabel: 0xd98ad0, column: 0x8fd48f, flowcell: 0xf0c040,
     salineSalt: 0xe8ebed, solventBase: 0xd88a5a, bufferMix: 0x8fb8e0
 };
 const FIRE_COAT = 0xc2a87a, FIRE_BAND = 0xffd633, FIRE_HAT = 0xf5c518;  // beige turnout, yellow bands and helmet
@@ -576,25 +583,114 @@ class LabScene {
         }
         this.breakRoomGroup = new THREE.Group();
         this.scene.add(this.breakRoomGroup);
-        this.coffeeMachine = null; this.radioProp = null;
+        this.coffeeMachine = null; this.radioProp = null; this.skips = [];
         // Both annexes are furnished the same way, from the same table in grid.js. The props
         // differ, the mechanism doesn't.
-        const props = ANNEX_KINDS.flatMap(k => annexProps(state, k));
-        for (const prop of props) {
-            const w = tileToWorld(prop.tile[0], prop.tile[1]);
-            const g = this[`_prop_${prop.key}`]();
-            g.position.set(w.x, 0, w.z);
-            g.rotation.y = -(prop.rot || 0) * Math.PI / 2;   // same convention as equipment
-            this.breakRoomGroup.add(g);
-            if (prop.key === 'coffee') {
-                this.coffeeMachine = g;
-                // the radio sits on the end of the coffee counter, once that upgrade is bought
-                const r = this._prop_radio();
-                r.position.set(w.x + 0.28, 0.58, w.z - 0.16);
-                r.visible = (state.upgrades.radio || 0) > 0;
-                this.breakRoomGroup.add(r);
-                this.radioProp = r;
+        const areas = roomAreas(state);
+        for (const kind of ANNEX_KINDS) {
+            const tiles = areas.get(kind) || EMPTY_SET;
+            const doors = annexDoorways(state, kind, tiles);
+            for (const prop of annexProps(state, kind)) {
+                const w = tileToWorld(prop.tile[0], prop.tile[1]);
+                const g = this[`_prop_${prop.key}`]();
+                g.rotation.y = -(prop.rot || 0) * Math.PI / 2;   // same convention as equipment
+                const { dx, dz } = this._fitInsideWalls(g, prop.tile, tiles, doors);
+                g.position.set(w.x + dx, 0, w.z + dz);
+                this.breakRoomGroup.add(g);
+                this._placeProp(state, prop, g);
             }
+        }
+    }
+    // The room's partition walls stand inside its own edge tiles (see _rebuildRoomWalls), so a
+    // prop sized to fill its tile pokes out through any side of it that has a wall. Shifts it off
+    // the walled sides, and only if it still can't fit, shrinks it across the floor (never in
+    // height) until it clears the wall's inner face. Sides open onto more of the room are left
+    // alone, so racks along a wall still stand shoulder to shoulder.
+    _fitInsideWalls(g, tile, tiles, doors) {
+        const [tx, tz] = tile;
+        const key = `${tx},${tz}`;
+        const walled = (dx, dz) => !tiles.has(`${tx + dx},${tz + dz}`) && !doors.has(`${key}|${dx},${dz}`);
+        // Wall centre sits 0.4 out from the tile centre and is 0.16 thick plus its trim lip, so
+        // its inner face is at about 0.295. A little clearance on top of that.
+        const IN = 0.27, OPEN = 0.49;
+        const lo = { x: walled(-1, 0) ? -IN : -OPEN, z: walled(0, -1) ? -IN : -OPEN };
+        const hi = { x: walled(1, 0) ? IN : OPEN, z: walled(0, 1) ? IN : OPEN };
+        g.updateMatrixWorld(true);
+        const b = new THREE.Box3().setFromObject(g);
+        const sizeX = b.max.x - b.min.x, sizeZ = b.max.z - b.min.z;
+        const k = Math.min(1, (hi.x - lo.x) / sizeX, (hi.z - lo.z) / sizeZ);
+        if (k < 1) g.scale.set(k, 1, k);
+        // Bounds scale about the origin along with the model.
+        const fit = (min, max, a, z) => {
+            min *= k; max *= k;
+            if (min < a) return a - min;
+            if (max > z) return z - max;
+            return 0;
+        };
+        return { dx: fit(b.min.x, b.max.x, lo.x, hi.x), dz: fit(b.min.z, b.max.z, lo.z, hi.z) };
+    }
+    // Whatever a particular prop needs hooking up once it's standing in place.
+    _placeProp(state, prop, g) {
+        if (prop.key === 'skip') this.skips.push(g);
+        if (prop.key === 'coffee') {
+            this.coffeeMachine = g;
+            // the radio sits on the end of the coffee counter, once that upgrade is bought
+            const r = this._prop_radio();
+            r.position.set(g.position.x + 0.28 * g.scale.x, 0.58, g.position.z - 0.16 * g.scale.z);
+            r.visible = (state.upgrades.radio || 0) > 0;
+            this.breakRoomGroup.add(r);
+            this.radioProp = r;
+        }
+    }
+    // A clinical waste bin: blue square-section body, a wider collar round the top, a snap-on
+    // yellow lid and the biohazard label on the front. The yellow liner rises up under the lid as
+    // it fills and pushes it open, so a full one reads from across the floor without clicking it.
+    // Built on its own so the one standing on a spot and the one in somebody's arms match.
+    _clinicalBin(col = 0x2f5fc4) {
+        const g = new THREE.Group();
+        const dark = 0x22489a;
+        const body = box(0.38, 0.52, 0.32, col); body.position.y = 0.26; g.add(body);
+        const collar = box(0.42, 0.1, 0.36, dark); collar.position.y = 0.57; g.add(collar);
+        // The recessed kick-step at the foot of the front face.
+        const step = box(0.16, 0.08, 0.02, dark); step.position.set(0, 0.04, 0.161); g.add(step);
+        const label = box(0.2, 0.15, 0.01, 0xf2f3f5); label.position.set(0.03, 0.42, 0.165); g.add(label);
+        const diamond = box(0.07, 0.07, 0.01, 0x4a3f78); diamond.rotation.z = Math.PI / 4;
+        diamond.position.set(0.0, 0.41, 0.171); g.add(diamond);
+        const bag = box(0.34, 0.2, 0.28, 0xf0d040); bag.position.y = 0.5; g.add(bag);
+        const hinge = new THREE.Group(); hinge.position.set(0, 0.63, -0.18); g.add(hinge);
+        const lid = box(0.42, 0.05, 0.37, 0xf2e33c); lid.position.set(0, 0.02, 0.18); hinge.add(lid);
+        g.userData.bag = bag; g.userData.lid = hinge;
+        return g;
+    }
+    // A wheeled skip in the waste store. The heap inside rises with how full the store is, set
+    // every frame in _syncSkips(), so you can see collection day coming.
+    _prop_skip() {
+        const g = new THREE.Group();
+        // Long and shallow: the store is one tile deep with a wall either side, so the skips
+        // stand end to end along it.
+        const body = box(0.84, 0.62, 0.48, 0x4f7a3e); body.position.y = 0.39; g.add(body);
+        const lip = box(0.9, 0.06, 0.52, 0x3f5f32); lip.position.y = 0.72; g.add(lip);
+        for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+            const wheel = cyl(0.06, 0.06, 0.05, 8, 0x22262a); wheel.rotation.x = Math.PI / 2;
+            wheel.position.set(sx * 0.32, 0.06, sz * 0.17); g.add(wheel);
+        }
+        // The same yellow clinical bags the bins are lined with, piled up.
+        const heap = box(0.76, 0.5, 0.4, 0xe0c040); heap.position.y = 0.3; g.add(heap);
+        g.userData.heap = heap;
+        return g;
+    }
+    _syncSkips(state) {
+        if (!this.skips || !this.skips.length) return;
+        // Filled in order, one skip at a time, the way you'd actually fill them.
+        const per = WASTE_TIER_CAPACITY[annexLevel(state, 'waste')] / this.skips.length;
+        let left = state.waste || 0;
+        for (const sk of this.skips) {
+            const f = Math.max(0, Math.min(1, left / per));
+            left -= per;
+            const heap = sk.userData.heap;
+            heap.visible = f > 0.02;
+            heap.scale.y = Math.max(0.05, f);
+            heap.position.y = 0.1 + 0.25 * heap.scale.y + f * 0.18;
         }
     }
     // Stockroom racking. Deliberately the same open timber shelving the crates arrive in, so a
@@ -1251,6 +1347,15 @@ class LabScene {
                 }
             }
             const label = box(0.22, 0.14, 0.02, 0xf4ede0); label.position.set(0, 1.28, d / 2 - 0.02); g.add(label);
+        } else if (e.type === 'wastebin') {
+            // The spot itself: a yellow-and-black marked square on the floor, there whether or not
+            // a bin is standing on it, so an empty spot still reads as "a bin goes here".
+            const mark = box(0.62, 0.012, 0.62, 0xe8c020); mark.position.y = 0.006; g.add(mark);
+            const inner = box(0.5, 0.014, 0.5, 0x3a3f44); inner.position.y = 0.007; g.add(inner);
+            const binG = this._clinicalBin(col);
+            g.add(binG);
+            g.userData.binModel = binG;
+            g.userData.binBag = binG.userData.bag; g.userData.binLid = binG.userData.lid;
         } else if (e.type === 'mopcloset') {
             // Broom and bucket used to sit far enough forward (and the tilted broom's swing far
             // enough) that both poked out through the closet's own front face instead of reading
@@ -1427,6 +1532,7 @@ class LabScene {
     _buildSample(s) {
         const g = new THREE.Group();
         g.userData = { kind: 'sample', id: s.id };
+        g.scale.setScalar(SAMPLE_SCALE);
         this._fillSample(g, s);
         return g;
     }
@@ -1525,6 +1631,15 @@ class LabScene {
         mug.visible = false;
         arms.r.add(mug);
         g.userData.mug = mug;
+        // A whole clinical bin, held out in front in both hands: a sealed full one on the way to
+        // the waste store, a fresh one on the way back to its spot. Hung off the torso rather
+        // than an arm so it sits between the hands in the carry pose and leans with the body.
+        const carriedBin = this._clinicalBin();
+        carriedBin.scale.setScalar(0.62);
+        carriedBin.position.set(0, 0.04, 0.24);
+        carriedBin.visible = false;
+        torso.add(carriedBin);
+        g.userData.carriedBin = carriedBin;
 
         g.userData.arms = arms;
         g.userData.armSleeves = armParts;      // recoloured with the coat when gowning up
@@ -1798,6 +1913,7 @@ class LabScene {
         }
 
         this._updateFloor(state);
+        this._syncSkips(state);
 
         // Rooms live in state.equipment (they're bought, sold and saved like anything else) but
         // they're drawn by _updateFloor as floor, so they get no mesh here, which also keeps them
@@ -1810,6 +1926,15 @@ class LabScene {
             if (mesh.userData.rot !== e.rot || mesh.userData.tx !== e.tx || mesh.userData.tz !== e.tz)
                 this._applyEquipTransform(mesh, e);
             this._syncTray(mesh, e);
+            if (mesh.userData.binModel) {
+                // Gone from the spot while it's being carried out, back when a fresh one is set down.
+                mesh.userData.binModel.visible = !!e.hasBin;
+                const f = e.hasBin ? Math.min(1, (e.waste || 0) / WASTE_BIN_CAP) : 0;
+                // From hidden inside the body to bulging up under the lid.
+                mesh.userData.binBag.position.y = 0.5 + f * 0.16;
+                mesh.userData.binBag.visible = f > 0;
+                mesh.userData.binLid.rotation.x = -f * f * 1.1;
+            }
             const all = e.processing || [];
             const busy = all.length > 0;
             mesh.traverse(o => { if (o.userData.spin) o.visible = busy; });
@@ -1928,7 +2053,7 @@ class LabScene {
                 mesh.userData.target = { x: s.wx + hx + rx * spread, y: 0.56, z: s.wz + hz + rz * spread };
             } else {
                 mesh.userData.carrier = null;
-                mesh.userData.target = { x: s.wx, y: 0.14, z: s.wz };
+                mesh.userData.target = { x: s.wx, y: 0.08, z: s.wz };
             }
         });
 
@@ -2003,7 +2128,15 @@ class LabScene {
             } else {
                 mesh.userData.faceTarget = null;
             }
-            mesh.userData.carrying = !!((s.carrying && s.carrying.length) || s.carryingCrate);
+            mesh.userData.carrying = !!((s.carrying && s.carrying.length) || s.carryingCrate || s.carryingBin);
+            const cb = mesh.userData.carriedBin;
+            if (cb) {
+                cb.visible = !!s.carryingBin;
+                // A sealed one goes out lid down and liner full; a fresh one is empty.
+                cb.userData.bag.visible = s.carryingBin === 'full';
+                cb.userData.bag.position.y = 0.5;
+                cb.userData.lid.rotation.x = 0;
+            }
             const idling = s.state === 'idle' || s.state === 'resting';
             const cm = this.coffeeMachine.position;
             mesh.userData.chatterEligible = idling && Math.hypot(s.wx - cm.x, s.wz - cm.z) < 2.0;
@@ -2368,13 +2501,14 @@ class LabScene {
             // the one under it, so they clipped through each other. 0.32 clears a 0.22-wide tube
             // even when the row runs diagonally across its square footprint.
             const rowAngle = facing + Math.PI / 2;
-            const rx = Math.sin(rowAngle) * 0.32, rz = Math.cos(rowAngle) * 0.32;
+            const gap = 0.32 * SAMPLE_SCALE;
+            const rx = Math.sin(rowAngle) * gap, rz = Math.cos(rowAngle) * gap;
             const spread = car.idx - (car.n - 1) / 2;
             // The carrier's walk bob lives on their body group, so ride that too or the tube
             // hangs still while the person holding it bounces.
             const bob = cm.userData.body ? cm.userData.body.position.y : 0;
             mesh.position.set(cm.position.x + hx + rx * spread,
-                              CARRY_HAND.y - (mesh.userData.holdY || 0) + bob,
+                              CARRY_HAND.y - (mesh.userData.holdY || 0) * SAMPLE_SCALE + bob,
                               cm.position.z + hz + rz * spread);
         });
         this.crateMeshes.forEach((mesh) => {

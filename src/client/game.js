@@ -16,6 +16,8 @@ import { buyUpgrade, buyZone, orderStock, driftPrices, deliverOrders, unitPrice,
 import { recomputeGrime } from './systems/dirt.js';
 import { updateEquipment, callMechanic, mechanicVisit, mechanicQuote, runShortage} from './systems/equipment.js';
 import { updateVisitors, clearVisitors, mechanicOnSite } from './systems/visitors.js';
+import { collectWaste, wasteCapacity, wasteCommitted, nextCollectionDay, binFill, isBin, hasBin } from './systems/waste.js';
+import { WASTE_BIN_CAP, WASTE_FEE_PER_BIN, WASTE_PICKUP_DAYS } from './data.js';
 import { updateIncidents, dailyIncidents, evacuate, endEvacuation, callFireBrigade, callDisinfection,
          settleLawsuit, fightLawsuit, settlementOf, alarmReliability, isBurning, isQuarantined } from './systems/incidents.js';
 
@@ -44,7 +46,8 @@ export {
     cancelCost, checkSolvency, endRun, runShortage, orderPlan, placeOrders,
     evacuate, endEvacuation, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
     alarmReliability, isBurning, isQuarantined,
-    DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS
+    DISINFECT_FEE, FIRE_BRIGADE_FEE, LAWSUIT_DAYS,
+    wasteCapacity, wasteCommitted, nextCollectionDay, binFill, isBin, hasBin, WASTE_BIN_CAP, WASTE_FEE_PER_BIN, WASTE_PICKUP_DAYS
 };
 export function acceptContract(id) { acceptContractSys(id, spawnSample); }
 export function cancelContract(id) { cancelContractSys(id, abandonSample); }
@@ -74,11 +77,13 @@ function fresh() {
         // 23 units all in — fits the door shelf (STOCK_BASE_CAPACITY) with room for a little more,
         // and one batch's worth of each ingredient so the first brew order can actually be filled.
         ingredients: { salineSalt: 3, solventBase: 3, bufferMix: 3 },
-        supplies: { disposable: 10, slide: 4 },
+        // A few clinical waste bins on the shelf, so the first bin spots get filled straight away.
+        supplies: { disposable: 10, slide: 4, wastebin: 3 },
         prices: {},                 // per-item multiplier on list price, drifts daily
         prevPrices: {},
         orders: [],                 // placed today, delivered on `day`
         water: 10,
+        waste: 0,                   // sealed bins sitting in the waste store, awaiting collection
         ownedZones: ZONES.filter(z => z.startOwned).map(z => z.id),
         dirt: {},
         dirtClaims: {},
@@ -92,7 +97,7 @@ function fresh() {
         outbreak: null,             // { tiles, day, crewDay, source } while a containment room is sealed
         lawsuits: [],
         visitors: [],               // people on site who aren't staff — see systems/visitors.js
-        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0, orders: 0 },
+        upgrades: { speed: 0, cold: 0, marketing: 0, staff: 0, clean: 0, radio: 0, cart: 0, storage: 0, orders: 0, waste: 0 },
         stats: { done: 0, failed: 0, cancelled: 0, processed: 0, spoiled: 0, contam: 0, mopped: 0, fires: 0, outbreaks: 0, deaths: 0, shelved: 0,
                  peakRep: 0, peakMoney: START_LOAN },
         receivership: null,         // { since } once the bank has stepped in — see systems/economy.js
@@ -273,6 +278,7 @@ function advanceTime(dt) {
         applyDailyInterest();
         checkSolvency();            // ...and the bank's view of all that
         deliverOrders();
+        collectWaste();             // the contractor's round, every few mornings
         driftPrices();
         checkContractArrivals(spawnSample);
         for (const c of s.contracts.slice()) if (s.day > c.deadline) failContract(c, abandonSample);
@@ -341,6 +347,10 @@ function loadSave() {
         if (s.upgrades.radio == null) s.upgrades.radio = 0;
         if (s.upgrades.cart == null) s.upgrades.cart = 0;
         if (s.upgrades.storage == null) s.upgrades.storage = 0;
+        // Waste is new: an older lab starts with an empty store and no bins, and finds out the
+        // first time a run finishes with nowhere to put its rubbish.
+        if (s.upgrades.waste == null) s.upgrades.waste = 0;
+        if (s.waste == null) s.waste = 0;
         if (s.mechanicDay === undefined) s.mechanicDay = null;
         // Accidents are new: a save from before them has no fires to put out and nobody suing.
         s.fires ||= []; s.lawsuits ||= [];
@@ -415,6 +425,7 @@ function loadSave() {
             // worker. Left alone, a stale one would make findReadyBatchJob()/assignMechanicJob()
             // skip this equipment forever, since nothing would ever be left to clear it.
             e.operateClaim = null;
+            e.binClaim = null;
         }
         if (!s.util) s.util = freshUtil();      // the day-load readout starts collecting fresh
         s.usedToday ||= {}; s.usedPrev ||= {};   // the ordering desk's burn-rate history

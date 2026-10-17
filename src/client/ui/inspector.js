@@ -30,6 +30,8 @@ const DOING = {
     toDesk: 'off to the procurement desk', ordering: 'ordering stock',
     operating: 'starting a run', tending: 'working a machine', toCrate: 'off to a delivery',
     toStock: 'carrying a crate to the stockroom', stocking: 'putting stock away',
+    toBin: 'off to take a full bin out', toWaste: 'carrying a sealed bin to the waste store', dumping: 'putting a sealed bin in the store',
+    toBinStock: 'off to the stockroom for a new bin', toBinSpot: 'carrying a new bin to its spot', settingBin: 'setting up a new bin',
     evacuating: 'evacuating', evacuatingDone: 'outside', sick: 'going home sick', sickDone: 'off sick'
 };
 

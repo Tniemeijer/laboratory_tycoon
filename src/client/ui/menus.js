@@ -15,7 +15,8 @@ import {
     bottleneck, machineLoad, staffLoad,
     careerLevel, perksOwed, dailyWage, choosePerk,
     acceptContract, cancelContract, cancelCost, hireStaff, toggleStaffCap, fireStaff, buyUpgrade, buyZone, toggleColdStore, callMechanic,
-    borrowLoan, repayLoan, suppliesForStep, ORDER_COVER_DAYS, ORDER_CASH_RESERVE} from '../game.js';
+    borrowLoan, repayLoan, suppliesForStep, suppliesForCap,
+    wasteCapacity, wasteCommitted, nextCollectionDay, binFill, isBin, hasBin, WASTE_BIN_CAP, WASTE_FEE_PER_BIN, ORDER_COVER_DAYS, ORDER_CASH_RESERVE} from '../game.js';
 import { sealedRooms } from '../grid.js';
 import { restartTutorial } from './tutorial.js';
 
@@ -166,8 +167,23 @@ export function contractTasks(protoKey) {
         if (days.length) return `on order, arriving Day ${Math.min(...days)}`;
         return null;
     };
+    // How much of a supply the next run of this job actually takes. "Any on the shelf" isn't the
+    // test a run applies: per-sample items are charged for the whole batch, so one slide left
+    // with three samples staged is a stopped machine, and the panel used to call that fine.
+    const neededNow = (key) => {
+        let need = 1;
+        if (!SUPPLIES[key].perSample) return need;
+        for (const e of s.equipment) {
+            if (!e.staged || !e.staged.length) continue;
+            const groups = new Map();
+            for (const g of e.staged) if (g.proto === protoKey) groups.set(g.cap, (groups.get(g.cap) || 0) + 1);
+            for (const [cap, n] of groups)
+                if (suppliesForCap(protoKey, cap).includes(key)) need = Math.max(need, Math.min(BUILD[e.type].batch || 1, n));
+        }
+        return need;
+    };
     for (const k of sup) {
-        if (stockCount(k) > 0) continue;
+        if (stockCount(k) >= neededNow(k)) continue;
         const due = arrivalOf(k);
         if (due) waiting(`<b>${SUPPLIES[k].name}</b> are ${due}.`);
         else todo(`Order <b>${SUPPLIES[k].name}</b> in <b>Stock</b>. Runs won't start without them.`);
@@ -204,6 +220,19 @@ export function contractTasks(protoKey) {
     if (needsWater && s.water < REAGENT_WATER_COST && !s.equipment.some(e => BUILD[e.type].kind === 'water'))
         todo(`Build a <b>Sink</b>, or order <b>Distilled Water</b>. Brewing needs it and the tank is empty.`);
     if (!s.staff.length) todo(`Hire a scientist in <b>Staff</b>. Nothing moves without one.`);
+    // Any job that handles a sample makes rubbish. It isn't a hard stop, but with nowhere to put
+    // it the floor round every machine slowly turns to grime, and nothing else would say why.
+    if (sup.has('disposable') && !s.equipment.some(isBin))
+        todo(`Build a <b>Waste Bin</b> near your machines. Without one, used disposables go on the floor.`);
+    if (s.equipment.some(isBin) && wasteCommitted() >= wasteCapacity()
+        && s.equipment.some(e => isBin(e) && binFill(e) >= WASTE_BIN_CAP))
+        waiting(`The <b>waste store</b> is full, so full bins can't go out. Collection is on Day ${nextCollectionDay()}.`);
+    // A spot with no bin in it is as good as no spot, and the fix is an order, not a build.
+    if (sup.has('disposable') && s.equipment.some(e => isBin(e) && !hasBin(e)) && stockCount('wastebin') <= 0) {
+        const due = arrivalOf('wastebin');
+        if (due) waiting(`<b>Waste Bins</b> are ${due}. Until then a bin spot stands empty.`);
+        else todo(`Order <b>Waste Bins</b> in <b>Stock</b>. A bin spot is standing empty.`);
+    }
     return tasks;
 }
 // Renders the list, or nothing at all when the lab is ready for this job.
@@ -358,6 +387,22 @@ export const BUILDERS = {
               <div class="meter"><i style="width:${pct}%" class="${pct > 90 ? 'bad' : pct > 70 ? 'mid' : 'good'}"></i></div>`;
         h += `<div class="c-org">The stockroom is the annex east of the entrance${lv ? ` — racked out to level ${lv}` : ', currently one rack by the door'}. ${lv < maxLv ? 'Extend it under <b>Upgrades → Stockroom</b>. ' : ''}Prices move every morning and orders land the next day, so it pays to buy ahead while something's cheap, but anything on order, or still sitting in a crate by the door, reserves its shelf space now.</div>`;
 
+        // Waste lives in this menu too: it's the same kind of logistics (a room by the street that
+        // fills up and has to be dealt with), and the player looking at one wants the other.
+        {
+            const wUsed = s.waste || 0, wCap = wasteCapacity(), wPct = Math.min(100, Math.round(wUsed / wCap * 100));
+            const wLv = s.upgrades.waste || 0, wMax = UPGRADES.waste.max;
+            const bins = s.equipment.filter(isBin);
+            const binsFull = bins.filter(e => binFill(e) >= WASTE_BIN_CAP).length;
+            const binsEmpty = bins.filter(e => !hasBin(e)).length;
+            const wc = wPct > 90 ? 'bad' : wPct > 70 ? 'mid' : 'good';
+            h += `<div class="meter-lbl">Waste store <b class="${wc}">${wUsed}/${wCap} bins</b></div>
+                  <div class="meter"><i style="width:${wPct}%" class="${wc}"></i></div>`;
+            h += `<div class="c-org">Collected on Day ${nextCollectionDay()}, at $${WASTE_FEE_PER_BIN} a bin. ${bins.length
+                ? `${bins.length} bin spot${bins.length > 1 ? 's' : ''} on the floor${binsFull ? `, <b>${binsFull} full</b>` : ''}${binsEmpty ? `, <b>${binsEmpty} without a bin</b>` : ''}. Full bins go out whole and a fresh one comes from stock.`
+                : '<b>No Waste Bins yet</b>: build some near your machines or the waste goes on the floor.'} ${wLv < wMax ? 'Extend the store under <b>Upgrades → Waste Store</b>.' : ''}</div>`;
+        }
+
         if (crates) {
             h += `<div class="dd-sub">At the door <span class="dim">waiting to be put away</span></div><div class="col">`;
             const byKey = {};
@@ -398,8 +443,9 @@ export const BUILDERS = {
 
         h += `<div class="dd-sub">Consumables <span class="dim">used up by runs</span></div><div class="col">`;
         for (const [k, item] of Object.entries(SUPPLIES)) {
-            const usedBy = item.caps ? item.caps.map(c => CAP_LABEL[c]).join(', ') : 'every run';
             h += row(k, item);
+            if (item.note) { h += `<div class="c-org">${item.note}</div>`; continue; }
+            const usedBy = item.caps ? item.caps.map(c => CAP_LABEL[c]).join(', ') : 'every run';
             h += `<div class="c-org">${usedBy} · ${item.perSample ? 'one per sample' : 'one per run, however full the batch'}</div>`;
         }
         h += `</div>`;
@@ -677,6 +723,8 @@ function labelState(st) {
         toOperate: 'to machine', operating: 'starting a run', tending: 'working the bench',
         toDesk: 'to the desk', ordering: 'ordering stock',
         toCrate: 'to the delivery', toStock: 'carrying a crate', stocking: 'putting stock away',
+        toBin: 'to a full bin', toWaste: 'taking a bin out', dumping: 'storing a full bin',
+        toBinStock: 'fetching a new bin', toBinSpot: 'carrying a new bin', settingBin: 'setting up a bin',
         evacuating: 'evacuating!', evacuatingDone: 'outside', sick: 'going home sick', sickDone: 'off sick'
     })[st] || st;
 }

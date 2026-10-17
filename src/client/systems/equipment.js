@@ -24,6 +24,7 @@ import { addDirt } from './dirt.js';
 import { completeContract } from './contracts.js';
 import { fireRoll, outbreakRoll, isBurning, isQuarantined } from './incidents.js';
 import { spawnMechanic, underService, mechanicOnSite } from './visitors.js';
+import { depositWaste } from './waste.js';
 
 function takeReagent(type) {
     const s = G.state;
@@ -77,7 +78,7 @@ function warnShortage(st, missing) {
     if (s.warns[key]) return;
     s.warns[key] = 1;
     G.sfx('money.bad');
-    G.onToast(`Out of ${missing}, ${BUILD[st.type].name} is stopped until it's restocked`, true);
+    G.onToast(`Out of ${missing}, ${BUILD[st.type].name} is stopped until it's restocked. Order more in Stock`, true);
 }
 
 export function batchReady(st) {
@@ -95,6 +96,10 @@ export function batchReady(st) {
     }
     const batch = b.batch || 1;
     for (const list of groups.values()) {
+        // Not even one sample's worth on the shelf: say so now, rather than staying silent until
+        // the batch fills or times out while staff keep loading a machine that can't start.
+        const empty = runShortage(list[0].cap, list[0].proto, 1);
+        if (empty) { warnShortage(st, empty); continue; }
         const oldest = Math.max(...list.map(x => x.wait));
         if (list.length < batch && oldest < BATCH_MAX_WAIT) continue;
         // Don't offer a run that can't be finished: without the consumables it needs, the batch
@@ -136,7 +141,10 @@ export function startRun(st, group) {
     // items scale with the batch; the expensive per-run ones (a flow cell, a column) are charged
     // once no matter how full the machine is, which is exactly why it's worth waiting for a
     // fuller batch.
-    for (const key of suppliesForCap(proto, cap)) takeStock(key, SUPPLIES[key].perSample ? n : 1);
+    const used = suppliesForCap(proto, cap);
+    for (const key of used) takeStock(key, SUPPLIES[key].perSample ? n : 1);
+    // Every pack of disposables a run gets through comes back out of it as rubbish once it's done.
+    const waste = used.includes('disposable') ? n : 0;
     G.sfx('machine.start');
 
     const clFactor = cleanliness() / 100;
@@ -157,7 +165,7 @@ export function startRun(st, group) {
     }
 
     st.processing ||= [];
-    const entry = { sampleIds: samples.map(x => x.id), cap, proto, t: 0, dur };
+    const entry = { sampleIds: samples.map(x => x.id), cap, proto, t: 0, dur, waste };
     st.processing.push(entry);
     dirtyUI();
     return entry;
@@ -185,6 +193,7 @@ function finishRun(st, p) {
     st.processing = st.processing.filter(x => x !== p);
     const n = p.sampleIds.length;
     addDirt(st, Math.max(2, 6 - 1.1 * s.upgrades.clean) * (1 + 0.25 * (n - 1)));
+    depositWaste(st, p.waste || 0);
 
     for (const id of p.sampleIds) {
         const sm = s.samples.find(x => x.id === id);

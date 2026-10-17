@@ -73,6 +73,12 @@ export const BUILD = {
     // a wall, which frees it from needing a wall to be next to and from having a facing at all.
     firealarm:  { name: 'Fire Alarm',    cost: 600,  cat: 'Utility', mount: true, ceiling: true, foot: [1, 1], minLevel: 1,
                   desc: "Ceiling sounder. Put it anywhere with floor under it. Evacuates the lab and calls the brigade by itself, provided you keep it serviced." },
+    // Every run that handles a sample leaves gloves, tips and tubes behind, and they go in the
+    // nearest bin. What you build is the spot, not the bin: clinical waste bins are single-use, so
+    // a full one is sealed and carried out whole and a fresh one comes up from the stockroom to
+    // stand in the same place. See systems/waste.js.
+    wastebin:   { name: 'Waste Bin',     cost: 60,   cat: 'Utility', kind: 'bin', foot: [1, 1], minLevel: 1,
+                  desc: 'A spot for a clinical waste bin. Machines within a few tiles throw their used disposables in it. A full bin is sealed and carried out to the waste store whole, and a fresh one is brought from the stockroom, so keep Waste Bins in stock. With no bin nearby, the waste goes on the floor.' },
     airlock:    { name: 'Airlock',       cost: 520,  cat: 'Utility', door: 'airlock', foot: [1, 1], minLevel: 2,
                   desc: "A double-door vestibule, so the room never loses its air. Placed like a Door, on an edge tile, facing out. Cleanrooms and Containment Labs take nothing less, and staff gown up passing through." }
 };
@@ -96,7 +102,10 @@ export const SUPPLIES = {
     slide:      { name: 'Slides',          unit: 'boxes', cost: 15,  perSample: true,  caps: null },
     fluorlabel: { name: 'Fluor. Labels',   unit: 'vials', cost: 48,  perSample: true,  caps: ['fluoresce'] },
     column:     { name: 'HPLC Columns',    unit: 'ea',    cost: 95,  perSample: false, caps: ['chroma'] },
-    flowcell:   { name: 'Flow Cells',      unit: 'ea',    cost: 220, perSample: false, caps: ['sequence'] }
+    flowcell:   { name: 'Flow Cells',      unit: 'ea',    cost: 220, perSample: false, caps: ['sequence'] },
+    // Not burned by a run directly: one goes out to a bin spot whenever a full bin is taken away.
+    wastebin:   { name: 'Waste Bins',      unit: 'ea',    cost: 14,  perSample: false, caps: null,
+                  note: 'one per bin spot, swapped in whenever a full bin goes out' }
 };
 // Which supply a given protocol step burns, on top of the disposables every run gets through.
 export const SUPPLY_FOR_CAP = (() => {
@@ -170,6 +179,24 @@ export const STOCK_TIER_CAPACITY = [45, 75, 110, 150, 195];
 // to carry each one in. Until then it's bought and paid for but unusable.
 export const CRATE_UNITS = 10;             // units per crate. An order is split into this many
 export const STOCK_UNLOAD_TIME = 3;        // seconds spent putting one crate away
+
+// ---------- waste ----------
+// A run leaves one unit of waste for every pack of disposables it got through, so dry steps
+// (writing up a report) leave nothing. It goes in the nearest bin within reach that has room.
+// Clinical bins are single-use: a full one is sealed and carried out whole to the waste store, an
+// annex by the street beside the stockroom, and a fresh one from stock takes its place. A
+// contractor empties the store every few days for a fee. A full store means bins can't go out,
+// no bins in stock means empty spots, and either way the waste ends up on the floor.
+export const WASTE_BIN_CAP = 8;            // units one bin holds
+export const WASTE_BIN_REACH = 5;          // tiles from a machine to a bin it'll use
+export const WASTE_EMPTY_AT = 0.75;        // a bin this full gets swapped. Each swap costs a bin
+export const WASTE_SPILL_DIRT = 4;         // grime per unit of waste that had nowhere to go
+export const WASTE_DUMP_TIME = 2;          // seconds spent setting a sealed bin down in the store
+export const WASTE_SWAP_TIME = 1.5;        // seconds spent setting a fresh bin up on its spot
+// Sealed bins the store holds, one entry per Waste Store upgrade level, like the stockroom.
+export const WASTE_TIER_CAPACITY = [4, 8, 12];
+export const WASTE_PICKUP_DAYS = 2;        // the contractor's round comes every this many days
+export const WASTE_FEE_PER_BIN = 20;       // what they charge per sealed bin taken away
 
 // Stock solutions. Crafted from an ingredient plus distilled water, perish after `shelf` days.
 export const REAGENTS = {
@@ -470,6 +497,7 @@ export const UPGRADES = {
     radio:     { name: 'Break Room Radio',  base: 1200, mult: 1.9, max: 3, desc: '+8% staff walking speed per level. Expect complaints' },
     cart:      { name: 'Sample Cart',       base: 1800, mult: 2.0, max: 3, desc: '+1 sample carried per trip per level' },
     storage:   { name: 'Stockroom',         base: 900,  mult: 1.8, max: 4, desc: 'Extends the stockroom annex. More racking and more shelf space each level' },
+    waste:     { name: 'Waste Store',       base: 700,  mult: 1.8, max: 2, desc: 'Extends the waste store by the street. Another skip and more room between collections each level' },
     // A one-off, not a ladder: you either have somebody doing the ordering or you don't. Buying it
     // puts the Procurement Desk in the Build menu; building one puts an Orders tickbox on your
     // staff. Two steps on purpose -- the upgrade is the capability, the desk is where it happens.

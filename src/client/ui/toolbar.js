@@ -7,7 +7,7 @@ import {
     canPlace, canAfford, isUnlocked, placeEquipment, rotateEquipment, moveEquipment, demolish,
     togglePause, setSpeed, newGame,
     evacuate, callFireBrigade, callDisinfection, settleLawsuit, fightLawsuit, settlementOf,
-    DISINFECT_FEE, FIRE_BRIGADE_FEE, RECEIVERSHIP_GRACE_DAYS} from '../game.js';
+    DISINFECT_FEE, FIRE_BRIGADE_FEE, RECEIVERSHIP_GRACE_DAYS, WASTE_BIN_CAP} from '../game.js';
 import { BUILDERS, wireMenu, setToolHandler } from './menus.js';
 import { renderTutorial } from './tutorial.js';
 import { selectStaff, clearSelection, render as renderInspector } from './inspector.js';
@@ -294,6 +294,7 @@ export const sceneHandlers = {
                 const b = BUILD[e.type];
                 let use;
                 if (e.broken) use = 'BROKEN. Needs a mechanic';
+                else if (b.kind === 'bin') use = e.hasBin ? `${e.waste || 0}/${WASTE_BIN_CAP} full` : 'empty spot, waiting for a new bin from stock';
                 else if (!(b.caps || []).length) use = b.slots ? ((e.processing || []).length || e.reserved ? 'in use' : 'free') : b.desc;
                 else {
                     const staged = (e.staged || []).length, running = (e.processing || []).length;
